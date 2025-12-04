@@ -162,11 +162,14 @@ class CompositeEffectivePropertyCalculator:
 
         print(f"Creating mesh (element size: {element_size} mm)...")
 
-        # Element type: SOLID186 (20-node hexahedral)
-        mapdl.et(1, 'SOLID186')
+        # Element type: SOLID187 (10-node tetrahedral) for complex geometry
+        mapdl.et(1, 'SOLID187')
 
         # Set element size
         mapdl.esize(element_size)
+
+        # Use free meshing (required for cylindrical geometry)
+        mapdl.mshkey(0)  # Free meshing
 
         # Mesh the fiber (Volume 2)
         mapdl.vsel('S', 'VOLU', '', 2)
@@ -181,6 +184,9 @@ class CompositeEffectivePropertyCalculator:
         mapdl.vsel('ALL')
         mapdl.nsel('ALL')
         mapdl.esel('ALL')
+
+        # Merge nodes at interface
+        mapdl.nummrg('NODE', 1e-6)
 
         # Get mesh statistics
         n_nodes = mapdl.get('NCOUNT', 'NODE', '', 'COUNT')

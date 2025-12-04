@@ -111,9 +111,12 @@ class AdvancedCompositeCalculator:
         m.mp('NUXY', 2, fp['nu'])
         m.mp('ALPX', 2, fp['alpha'])
 
-        # Element type
-        m.et(1, 'SOLID186')
+        # Element type: SOLID187 (10-node tetrahedral) for complex geometry
+        m.et(1, 'SOLID187')
         m.esize(elem_size)
+
+        # Use free meshing (required for cylindrical geometry)
+        m.mshkey(0)
 
         # Mesh fiber
         m.vsel('S', 'VOLU', '', 2)
@@ -126,6 +129,9 @@ class AdvancedCompositeCalculator:
         m.vmesh(3)
 
         m.allsel()
+
+        # Merge nodes at interface
+        m.nummrg('NODE', 1e-6)
 
         nn = int(m.get('NCOUNT', 'NODE', '', 'COUNT'))
         ne = int(m.get('ECOUNT', 'ELEM', '', 'COUNT'))

@@ -461,23 +461,29 @@ class CompositeEffectivePropertyCalculator:
         """Get average displacement on a face."""
         mapdl = self.mapdl
         L = self.rve_size
+        tol = 1e-6
 
         mapdl.post1()
         mapdl.set('LAST')
-
-        if face == 'X_POS':
-            mapdl.cmsel('S', 'X_POS')
-            disp = mapdl.get('UX_AVG', 'NODE', '', 'U', 'X', 'AVG')
-        elif face == 'Y_POS':
-            mapdl.cmsel('S', 'Y_POS')
-            disp = mapdl.get('UY_AVG', 'NODE', '', 'U', 'Y', 'AVG')
-        elif face == 'Z_POS':
-            mapdl.cmsel('S', 'Z_POS')
-            disp = mapdl.get('UZ_AVG', 'NODE', '', 'U', 'Z', 'AVG')
-        else:
-            disp = 0
-
         mapdl.nsel('ALL')
+
+        # Get all nodal displacements
+        all_disp = mapdl.post_processing.nodal_displacement('ALL')
+        all_nodes = mapdl.mesh.nodes
+
+        # Filter nodes on the face and get corresponding displacements
+        if face == 'X_POS':
+            mask = np.abs(all_nodes[:, 0] - L) < tol
+            disp = np.mean(all_disp[mask, 0]) if np.any(mask) else 0.0
+        elif face == 'Y_POS':
+            mask = np.abs(all_nodes[:, 1] - L) < tol
+            disp = np.mean(all_disp[mask, 1]) if np.any(mask) else 0.0
+        elif face == 'Z_POS':
+            mask = np.abs(all_nodes[:, 2] - L) < tol
+            disp = np.mean(all_disp[mask, 2]) if np.any(mask) else 0.0
+        else:
+            disp = 0.0
+
         mapdl.finish()
         return disp
 

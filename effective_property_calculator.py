@@ -234,12 +234,16 @@ class CompositeEffectivePropertyCalculator:
         # Clear previous constraints and loads
         mapdl.ddele('ALL', 'ALL')
 
-        # Fix corner node to prevent rigid body motion
-        mapdl.nsel('S', 'LOC', 'X', 0)
-        mapdl.nsel('R', 'LOC', 'Y', 0)
-        mapdl.nsel('R', 'LOC', 'Z', 0)
+        # Fix X- face in X direction
+        mapdl.cmsel('S', 'X_NEG')
         mapdl.d('ALL', 'UX', 0)
+
+        # Fix Y- face in Y direction (prevent rigid body motion in Y)
+        mapdl.cmsel('S', 'Y_NEG')
         mapdl.d('ALL', 'UY', 0)
+
+        # Fix Z- face in Z direction (prevent rigid body motion in Z)
+        mapdl.cmsel('S', 'Z_NEG')
         mapdl.d('ALL', 'UZ', 0)
 
         # Apply displacement on X+ face
@@ -255,12 +259,16 @@ class CompositeEffectivePropertyCalculator:
 
         mapdl.ddele('ALL', 'ALL')
 
-        # Fix corner node
-        mapdl.nsel('S', 'LOC', 'X', 0)
-        mapdl.nsel('R', 'LOC', 'Y', 0)
-        mapdl.nsel('R', 'LOC', 'Z', 0)
+        # Fix X- face in X direction
+        mapdl.cmsel('S', 'X_NEG')
         mapdl.d('ALL', 'UX', 0)
+
+        # Fix Y- face in Y direction
+        mapdl.cmsel('S', 'Y_NEG')
         mapdl.d('ALL', 'UY', 0)
+
+        # Fix Z- face in Z direction
+        mapdl.cmsel('S', 'Z_NEG')
         mapdl.d('ALL', 'UZ', 0)
 
         # Apply displacement on Y+ face
@@ -276,12 +284,16 @@ class CompositeEffectivePropertyCalculator:
 
         mapdl.ddele('ALL', 'ALL')
 
-        # Fix corner node
-        mapdl.nsel('S', 'LOC', 'X', 0)
-        mapdl.nsel('R', 'LOC', 'Y', 0)
-        mapdl.nsel('R', 'LOC', 'Z', 0)
+        # Fix X- face in X direction
+        mapdl.cmsel('S', 'X_NEG')
         mapdl.d('ALL', 'UX', 0)
+
+        # Fix Y- face in Y direction
+        mapdl.cmsel('S', 'Y_NEG')
         mapdl.d('ALL', 'UY', 0)
+
+        # Fix Z- face in Z direction
+        mapdl.cmsel('S', 'Z_NEG')
         mapdl.d('ALL', 'UZ', 0)
 
         # Apply displacement on Z+ face
@@ -297,21 +309,23 @@ class CompositeEffectivePropertyCalculator:
 
         mapdl.ddele('ALL', 'ALL')
 
-        # Fix corner node
-        mapdl.nsel('S', 'LOC', 'X', 0)
-        mapdl.nsel('R', 'LOC', 'Y', 0)
-        mapdl.nsel('R', 'LOC', 'Z', 0)
+        # Fix X- face: UX=0, UY=0
+        mapdl.cmsel('S', 'X_NEG')
         mapdl.d('ALL', 'UX', 0)
         mapdl.d('ALL', 'UY', 0)
+
+        # Fix Y- face: UX=0, UY=0
+        mapdl.cmsel('S', 'Y_NEG')
+        mapdl.d('ALL', 'UX', 0)
+        mapdl.d('ALL', 'UY', 0)
+
+        # Fix Z- face in Z direction
+        mapdl.cmsel('S', 'Z_NEG')
         mapdl.d('ALL', 'UZ', 0)
 
         # Apply shear: UY on X+ face
         mapdl.cmsel('S', 'X_POS')
-        mapdl.d('ALL', 'UY', strain_val * L / 2)
-
-        # Apply shear: UX on Y+ face
-        mapdl.cmsel('S', 'Y_POS')
-        mapdl.d('ALL', 'UX', strain_val * L / 2)
+        mapdl.d('ALL', 'UY', strain_val * L)
 
         mapdl.nsel('ALL')
 
@@ -322,21 +336,23 @@ class CompositeEffectivePropertyCalculator:
 
         mapdl.ddele('ALL', 'ALL')
 
-        # Fix corner node
-        mapdl.nsel('S', 'LOC', 'X', 0)
-        mapdl.nsel('R', 'LOC', 'Y', 0)
-        mapdl.nsel('R', 'LOC', 'Z', 0)
+        # Fix X- face in X direction
+        mapdl.cmsel('S', 'X_NEG')
         mapdl.d('ALL', 'UX', 0)
+
+        # Fix Y- face: UY=0, UZ=0
+        mapdl.cmsel('S', 'Y_NEG')
+        mapdl.d('ALL', 'UY', 0)
+        mapdl.d('ALL', 'UZ', 0)
+
+        # Fix Z- face: UY=0, UZ=0
+        mapdl.cmsel('S', 'Z_NEG')
         mapdl.d('ALL', 'UY', 0)
         mapdl.d('ALL', 'UZ', 0)
 
         # Apply shear: UZ on Y+ face
         mapdl.cmsel('S', 'Y_POS')
-        mapdl.d('ALL', 'UZ', strain_val * L / 2)
-
-        # Apply shear: UY on Z+ face
-        mapdl.cmsel('S', 'Z_POS')
-        mapdl.d('ALL', 'UY', strain_val * L / 2)
+        mapdl.d('ALL', 'UZ', strain_val * L)
 
         mapdl.nsel('ALL')
 
@@ -347,21 +363,23 @@ class CompositeEffectivePropertyCalculator:
 
         mapdl.ddele('ALL', 'ALL')
 
-        # Fix corner node
-        mapdl.nsel('S', 'LOC', 'X', 0)
-        mapdl.nsel('R', 'LOC', 'Y', 0)
-        mapdl.nsel('R', 'LOC', 'Z', 0)
+        # Fix X- face: UX=0, UZ=0
+        mapdl.cmsel('S', 'X_NEG')
         mapdl.d('ALL', 'UX', 0)
+        mapdl.d('ALL', 'UZ', 0)
+
+        # Fix Y- face in Y direction
+        mapdl.cmsel('S', 'Y_NEG')
         mapdl.d('ALL', 'UY', 0)
+
+        # Fix Z- face: UX=0, UZ=0
+        mapdl.cmsel('S', 'Z_NEG')
+        mapdl.d('ALL', 'UX', 0)
         mapdl.d('ALL', 'UZ', 0)
 
         # Apply shear: UX on Z+ face
         mapdl.cmsel('S', 'Z_POS')
-        mapdl.d('ALL', 'UX', strain_val * L / 2)
-
-        # Apply shear: UZ on X+ face
-        mapdl.cmsel('S', 'X_POS')
-        mapdl.d('ALL', 'UZ', strain_val * L / 2)
+        mapdl.d('ALL', 'UX', strain_val * L)
 
         mapdl.nsel('ALL')
 
@@ -371,15 +389,7 @@ class CompositeEffectivePropertyCalculator:
 
         mapdl.ddele('ALL', 'ALL')
 
-        # Fix corner node to prevent rigid body motion
-        mapdl.nsel('S', 'LOC', 'X', 0)
-        mapdl.nsel('R', 'LOC', 'Y', 0)
-        mapdl.nsel('R', 'LOC', 'Z', 0)
-        mapdl.d('ALL', 'UX', 0)
-        mapdl.d('ALL', 'UY', 0)
-        mapdl.d('ALL', 'UZ', 0)
-
-        # Fix X- face in X direction (symmetry-like)
+        # Fix X- face in X direction (symmetry BC)
         mapdl.cmsel('S', 'X_NEG')
         mapdl.d('ALL', 'UX', 0)
 

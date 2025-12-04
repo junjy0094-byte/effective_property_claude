@@ -95,6 +95,7 @@ class CompositeEffectivePropertyCalculator:
     def start_mapdl(self, **kwargs):
         """Start MAPDL instance."""
         self.mapdl = launch_mapdl(**kwargs)
+        self.mapdl.ignore_errors = True  # Ignore non-critical MAPDL warnings
         self.mapdl.clear()
         self.mapdl.prep7()
 

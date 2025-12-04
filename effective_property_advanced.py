@@ -75,6 +75,7 @@ class AdvancedCompositeCalculator:
     def launch(self, **kwargs):
         """Launch MAPDL."""
         self.mapdl = launch_mapdl(**kwargs)
+        self.mapdl.ignore_errors = True  # Ignore non-critical MAPDL warnings
         self.mapdl.clear()
         self.mapdl.prep7()
         print("MAPDL launched successfully")

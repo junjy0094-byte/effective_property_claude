@@ -72,13 +72,20 @@ class AdvancedCompositeCalculator:
         """Set material properties for a phase."""
         self.mat_props[phase] = {'E': E, 'nu': nu, 'alpha': alpha}
 
-    def launch(self, **kwargs):
-        """Launch MAPDL."""
-        self.mapdl = launch_mapdl(**kwargs)
+    def launch(self, nproc=12, **kwargs):
+        """
+        Launch MAPDL.
+
+        Parameters
+        ----------
+        nproc : int
+            Number of processors for SMP mode (default: 12)
+        """
+        self.mapdl = launch_mapdl(nproc=nproc, **kwargs)
         self.mapdl.ignore_errors = True  # Ignore non-critical MAPDL warnings
         self.mapdl.clear()
         self.mapdl.prep7()
-        print("MAPDL launched successfully")
+        print(f"MAPDL launched successfully (SMP with {nproc} cores)")
 
     def exit(self):
         """Exit MAPDL."""
@@ -125,6 +132,10 @@ class AdvancedCompositeCalculator:
         # Element type: SOLID185 (8-node hex)
         m.et(1, 'SOLID185')
 
+        # Save DB after material definition
+        m.save('step1_materials')
+        print("  Saved: step1_materials.db")
+
         # Create geometry using keypoints and volumes for mapped meshing
         # The RVE is divided into 9 volumes (3x3 in XY plane, extruded in Z)
         # Center volume is fiber, surrounding 8 volumes are matrix
@@ -164,6 +175,10 @@ class AdvancedCompositeCalculator:
 
         m.allsel()
 
+        # Save DB after geometry and mesh
+        m.save('step2_geometry_mesh')
+        print("  Saved: step2_geometry_mesh.db")
+
         # Merge nodes at interfaces
         m.nummrg('NODE', 1e-6)
 
@@ -176,6 +191,10 @@ class AdvancedCompositeCalculator:
 
         # Create master nodes for periodic BC
         self._create_master_nodes()
+
+        # Save DB after node pairs and master nodes
+        m.save('step3_node_pairs_master')
+        print("  Saved: step3_node_pairs_master.db")
 
         print("Model built successfully")
 
@@ -595,6 +614,11 @@ class AdvancedCompositeCalculator:
             self.mapdl.prep7()
             eps_applied = np.array(lc) * strain_mag
             self.apply_periodic_bc(eps_applied)
+
+            # Save DB before solving each load case
+            self.mapdl.save(f'step4_{jobnames[i]}_bc')
+            print(f"    Saved: step4_{jobnames[i]}_bc.db")
+
             self.solve(jobname=jobnames[i])
 
             stress = self.get_volume_avg_stress()

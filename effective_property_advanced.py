@@ -183,17 +183,18 @@ class AdvancedCompositeCalculator:
         # Clear all constraints
         m.ddele('ALL', 'ALL')
 
-        # Fix corner node at origin for rigid body motion
-        m.nsel('S', 'LOC', 'X', 0, 1e-6)
-        m.nsel('R', 'LOC', 'Y', 0, 1e-6)
-        m.nsel('R', 'LOC', 'Z', 0, 1e-6)
+        # Fix negative faces (prevents rigid body motion)
+        m.cmsel('S', 'XNEG')
         m.d('ALL', 'UX', 0)
+
+        m.cmsel('S', 'YNEG')
         m.d('ALL', 'UY', 0)
+
+        m.cmsel('S', 'ZNEG')
         m.d('ALL', 'UZ', 0)
 
         # Apply displacements on X+ face
         m.cmsel('S', 'XPOS')
-        ux_xpos = e11 * L + e12 * 0 + e31 * 0  # At x=L, y,z variable
         m.d('ALL', 'UX', e11 * L)
         m.d('ALL', 'UY', e12 * L)
         m.d('ALL', 'UZ', e31 * L)
@@ -210,16 +211,6 @@ class AdvancedCompositeCalculator:
         m.d('ALL', 'UY', e23 * L)
         m.d('ALL', 'UZ', e33 * L)
 
-        # Fix negative faces
-        m.cmsel('S', 'XNEG')
-        m.d('ALL', 'UX', 0)
-
-        m.cmsel('S', 'YNEG')
-        m.d('ALL', 'UY', 0)
-
-        m.cmsel('S', 'ZNEG')
-        m.d('ALL', 'UZ', 0)
-
         m.allsel()
 
     def apply_thermal_bc(self, delta_T=1.0):
@@ -228,13 +219,7 @@ class AdvancedCompositeCalculator:
 
         m.ddele('ALL', 'ALL')
 
-        # Fix corner for rigid body
-        m.nsel('S', 'LOC', 'X', 0, 1e-6)
-        m.nsel('R', 'LOC', 'Y', 0, 1e-6)
-        m.nsel('R', 'LOC', 'Z', 0, 1e-6)
-        m.d('ALL', 'ALL', 0)
-
-        # Fix edges for symmetry
+        # Fix negative faces for symmetry BC
         m.cmsel('S', 'XNEG')
         m.d('ALL', 'UX', 0)
 
@@ -250,13 +235,22 @@ class AdvancedCompositeCalculator:
         m.bfunif('TEMP', delta_T)
         m.tunif(0)
 
-    def solve(self):
-        """Solve current load case."""
+    def solve(self, jobname=None):
+        """Solve current load case and optionally save result file."""
         m = self.mapdl
+
+        # Set jobname for this load case if provided
+        if jobname:
+            m.finish()
+            m.filname(jobname)
+
         m.run('/SOLU')
         m.antype('STATIC')
         m.solve()
         m.finish()
+
+        if jobname:
+            print(f"    Result saved: {jobname}.rst")
 
     def get_volume_avg_stress(self):
         """
@@ -307,27 +301,32 @@ class AdvancedCompositeCalculator:
         return stress
 
     def get_thermal_strain(self, delta_T=1.0):
-        """Get thermal expansion strains."""
+        """Get thermal expansion strains using post_processing API."""
         m = self.mapdl
         L = self.L
+        tol = 1e-6
 
         m.post1()
         m.set('LAST')
+        m.nsel('ALL')
 
-        # Get average displacements on positive faces
-        m.cmsel('S', 'XPOS')
-        ux = m.get('UXAVG', 'NODE', '', 'U', 'X', 'AVG')
+        # Get all nodal displacements
+        all_disp = m.post_processing.nodal_displacement('ALL')
+        all_nodes = m.mesh.nodes
 
-        m.cmsel('S', 'YPOS')
-        uy = m.get('UYAVG', 'NODE', '', 'U', 'Y', 'AVG')
+        # Filter nodes on positive faces and get average displacements
+        mask_x = np.abs(all_nodes[:, 0] - L) < tol
+        ux = np.mean(all_disp[mask_x, 0]) if np.any(mask_x) else 0.0
 
-        m.cmsel('S', 'ZPOS')
-        uz = m.get('UZAVG', 'NODE', '', 'U', 'Z', 'AVG')
+        mask_y = np.abs(all_nodes[:, 1] - L) < tol
+        uy = np.mean(all_disp[mask_y, 1]) if np.any(mask_y) else 0.0
 
-        m.allsel()
+        mask_z = np.abs(all_nodes[:, 2] - L) < tol
+        uz = np.mean(all_disp[mask_z, 2]) if np.any(mask_z) else 0.0
+
         m.finish()
 
-        # Thermal strains
+        # Thermal strains (CTE = strain / delta_T)
         eps_th = np.array([ux/L, uy/L, uz/L]) / delta_T
 
         return eps_th
@@ -349,6 +348,7 @@ class AdvancedCompositeCalculator:
         print(f"\n{'='*60}")
         print("COMPUTING STIFFNESS MATRIX")
         print(f"{'='*60}")
+        print(f"Result files will be saved in: {self.mapdl.directory}")
 
         C = np.zeros((6, 6))
 
@@ -363,6 +363,7 @@ class AdvancedCompositeCalculator:
         ]
 
         directions = ['ε11', 'ε22', 'ε33', 'γ12', 'γ23', 'γ31']
+        jobnames = ['LC1_e11', 'LC2_e22', 'LC3_e33', 'LC4_g12', 'LC5_g23', 'LC6_g31']
 
         for i, lc in enumerate(load_cases):
             print(f"  Load case {i+1}/6: {directions[i]}...")
@@ -370,7 +371,7 @@ class AdvancedCompositeCalculator:
             self.mapdl.prep7()
             eps_applied = np.array(lc) * strain_mag
             self.apply_periodic_bc_with_master_nodes(eps_applied)
-            self.solve()
+            self.solve(jobname=jobnames[i])
 
             stress = self.get_volume_avg_stress()
             C[:, i] = stress / strain_mag
@@ -456,7 +457,7 @@ class AdvancedCompositeCalculator:
 
         self.mapdl.prep7()
         self.apply_thermal_bc(delta_T)
-        self.solve()
+        self.solve(jobname='LC7_thermal')
 
         eps_th = self.get_thermal_strain(delta_T)
 

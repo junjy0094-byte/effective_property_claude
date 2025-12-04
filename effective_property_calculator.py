@@ -47,10 +47,10 @@ class CompositeEffectivePropertyCalculator:
         self.matrix_nu = 0.35  # Poisson's ratio
         self.matrix_alpha = 60e-6  # 1/°C (CTE)
 
-        # Fiber: Carbon fiber (transversely isotropic, but simplified as isotropic here)
-        self.fiber_E = 230000  # MPa (Young's modulus)
-        self.fiber_nu = 0.20  # Poisson's ratio
-        self.fiber_alpha = -0.5e-6  # 1/°C (CTE, negative for carbon fiber)
+        # Fiber: Glass fiber (isotropic)
+        self.fiber_E = 72000  # MPa (Young's modulus)
+        self.fiber_nu = 0.22  # Poisson's ratio
+        self.fiber_alpha = 5e-6  # 1/°C (CTE, positive)
 
         # MAPDL instance
         self.mapdl = None
@@ -413,27 +413,27 @@ class CompositeEffectivePropertyCalculator:
         mapdl.set('LAST')
         mapdl.esel('ALL')
 
-        # Get stress components averaged over all elements
-        # Using ETABLE to extract and average stresses
+        # Get stress components averaged over all elements using SSUM
+        # First create element tables
         mapdl.etable('SX', 'S', 'X')
         mapdl.etable('SY', 'S', 'Y')
         mapdl.etable('SZ', 'S', 'Z')
         mapdl.etable('SXY', 'S', 'XY')
         mapdl.etable('SYZ', 'S', 'YZ')
         mapdl.etable('SXZ', 'S', 'XZ')
-        mapdl.etable('EVOL', 'VOLU')
 
-        # Calculate volume-weighted averages
-        total_volume = mapdl.get('VTOT', 'ELEM', '', 'ETAB', 'EVOL', 'SUM')
+        # Use SSUM to get statistics of element table data
+        mapdl.ssum()
 
-        sx_sum = mapdl.get('SXSUM', 'ELEM', '', 'ETAB', 'SX', 'SUM')
-        sy_sum = mapdl.get('SYSUM', 'ELEM', '', 'ETAB', 'SY', 'SUM')
-        sz_sum = mapdl.get('SZSUM', 'ELEM', '', 'ETAB', 'SZ', 'SUM')
-        sxy_sum = mapdl.get('SXYSUM', 'ELEM', '', 'ETAB', 'SXY', 'SUM')
-        syz_sum = mapdl.get('SYZSUM', 'ELEM', '', 'ETAB', 'SYZ', 'SUM')
-        sxz_sum = mapdl.get('SXZSUM', 'ELEM', '', 'ETAB', 'SXZ', 'SUM')
+        # Get the sum values using *GET with SSUM results
+        sx_sum = mapdl.get_value('SSUM', '', 'ITEM', 'SX')
+        sy_sum = mapdl.get_value('SSUM', '', 'ITEM', 'SY')
+        sz_sum = mapdl.get_value('SSUM', '', 'ITEM', 'SZ')
+        sxy_sum = mapdl.get_value('SSUM', '', 'ITEM', 'SXY')
+        syz_sum = mapdl.get_value('SSUM', '', 'ITEM', 'SYZ')
+        sxz_sum = mapdl.get_value('SSUM', '', 'ITEM', 'SXZ')
 
-        n_elem = mapdl.get('ECOUNT', 'ELEM', '', 'COUNT')
+        n_elem = mapdl.mesh.n_elem
 
         stress = {
             'SX': sx_sum / n_elem,
@@ -647,8 +647,8 @@ def main():
     # Set material properties (optional - using defaults)
     # Matrix: Epoxy
     calc.set_matrix_properties(E=3500, nu=0.35, alpha=60e-6)
-    # Fiber: Carbon fiber
-    calc.set_fiber_properties(E=230000, nu=0.20, alpha=-0.5e-6)
+    # Fiber: Glass fiber
+    calc.set_fiber_properties(E=72000, nu=0.22, alpha=5e-6)
 
     try:
         # Start MAPDL

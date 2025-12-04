@@ -46,7 +46,7 @@ class AdvancedCompositeCalculator:
         # Material properties
         self.mat_props = {
             'matrix': {'E': 3500.0, 'nu': 0.35, 'alpha': 60e-6},
-            'fiber': {'E': 230000.0, 'nu': 0.20, 'alpha': -0.5e-6}
+            'fiber': {'E': 72000.0, 'nu': 0.22, 'alpha': 5e-6}
         }
 
         self.mapdl = None
@@ -273,40 +273,34 @@ class AdvancedCompositeCalculator:
 
         m.esel('ALL')
 
-        # Create element tables for stresses and volumes
+        # Create element tables for stresses
         m.etable('SXX', 'S', 'X')
         m.etable('SYY', 'S', 'Y')
         m.etable('SZZ', 'S', 'Z')
         m.etable('SXY', 'S', 'XY')
         m.etable('SYZ', 'S', 'YZ')
         m.etable('SXZ', 'S', 'XZ')
-        m.etable('EVOL', 'VOLU')
 
-        # Get sums
-        vol_total = m.get('VOLTOT', 'ELEM', '', 'ETAB', 'EVOL', 'SUM')
+        # Use SSUM to get statistics of element table data
+        m.ssum()
 
-        # Volume-weighted stress (using SMULT and SADD for proper averaging)
-        m.smult('SXVOL', 'SXX', 'EVOL')
-        m.smult('SYVOL', 'SYY', 'EVOL')
-        m.smult('SZVOL', 'SZZ', 'EVOL')
-        m.smult('SXYVOL', 'SXY', 'EVOL')
-        m.smult('SYZVOL', 'SYZ', 'EVOL')
-        m.smult('SXZVOL', 'SXZ', 'EVOL')
+        # Get the sum values
+        sxx_sum = m.get_value('SSUM', '', 'ITEM', 'SXX')
+        syy_sum = m.get_value('SSUM', '', 'ITEM', 'SYY')
+        szz_sum = m.get_value('SSUM', '', 'ITEM', 'SZZ')
+        sxy_sum = m.get_value('SSUM', '', 'ITEM', 'SXY')
+        syz_sum = m.get_value('SSUM', '', 'ITEM', 'SYZ')
+        sxz_sum = m.get_value('SSUM', '', 'ITEM', 'SXZ')
 
-        sxx_sum = m.get('SXXSUM', 'ELEM', '', 'ETAB', 'SXVOL', 'SUM')
-        syy_sum = m.get('SYYSUM', 'ELEM', '', 'ETAB', 'SYVOL', 'SUM')
-        szz_sum = m.get('SZZSUM', 'ELEM', '', 'ETAB', 'SZVOL', 'SUM')
-        sxy_sum = m.get('SXYSUM', 'ELEM', '', 'ETAB', 'SXYVOL', 'SUM')
-        syz_sum = m.get('SYZSUM', 'ELEM', '', 'ETAB', 'SYZVOL', 'SUM')
-        sxz_sum = m.get('SXZSUM', 'ELEM', '', 'ETAB', 'SXZVOL', 'SUM')
+        n_elem = m.mesh.n_elem
 
         stress = np.array([
-            sxx_sum / vol_total,
-            syy_sum / vol_total,
-            szz_sum / vol_total,
-            sxy_sum / vol_total,
-            syz_sum / vol_total,
-            sxz_sum / vol_total
+            sxx_sum / n_elem,
+            syy_sum / n_elem,
+            szz_sum / n_elem,
+            sxy_sum / n_elem,
+            syz_sum / n_elem,
+            sxz_sum / n_elem
         ])
 
         m.finish()
@@ -576,7 +570,7 @@ def main():
 
     # Set material properties
     calc.set_material('matrix', E=3500, nu=0.35, alpha=60e-6)
-    calc.set_material('fiber', E=230000, nu=0.20, alpha=-0.5e-6)
+    calc.set_material('fiber', E=72000, nu=0.22, alpha=5e-6)
 
     try:
         print("Starting ANSYS MAPDL...")

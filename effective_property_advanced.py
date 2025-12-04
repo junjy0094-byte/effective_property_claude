@@ -134,7 +134,7 @@ class AdvancedCompositeCalculator:
         y1, y2 = c - a, c + a  # Fiber Y boundaries
 
         # Create 9 blocks in XY plane, extruded through Z
-        vol_id = 1
+        # Each block is created, assigned material, and meshed immediately
         regions = [
             # (x_start, x_end, y_start, y_end, material)
             (0, x1, 0, y1, 1),      # Bottom-left corner (matrix)
@@ -148,56 +148,19 @@ class AdvancedCompositeCalculator:
             (x2, L, y2, L, 1),      # Top-right corner (matrix)
         ]
 
-        for xs, xe, ys, ye, mat_id in regions:
-            m.block(xs, xe, ys, ye, 0, L)
-
-        # Glue all volumes together
-        m.vsel('ALL')
-        m.vglue('ALL')
-        m.allsel()
-
-        # Set element size for mapped mesh
-        # Calculate divisions based on geometry
-        fiber_width = 2 * a
-        matrix_width = (L - fiber_width) / 2
-
-        # Ensure matching divisions on opposite faces
-        n_fiber = max(2, int(n_div * fiber_width / L))
-        n_matrix = max(2, int(n_div * matrix_width / L))
-        n_z = n_div
-
-        # Set line divisions for mapped meshing
-        # Select lines by length and location
-        m.lsel('ALL')
-        m.lesize('ALL', '', '', n_div)
-
-        # Mesh all volumes
+        # Mesh settings
         m.mshkey(1)  # Mapped meshing
         m.mshape(0, '3D')  # Hex elements
 
-        # Mesh each volume with appropriate material
-        m.vsel('ALL')
-        volumes = m.vlist('ALL')
-
-        # We need to identify which volumes are fiber and which are matrix
-        # Get volume list and check their centroids
-        m.allsel()
-        n_vol = int(m.get('VCOUNT', 'VOLU', '', 'COUNT'))
-
-        for v in range(1, n_vol + 1):
-            m.vsel('S', 'VOLU', '', v)
-            # Get centroid (convert to float as m.get may return string)
-            cx = float(m.get('CENTX', 'VOLU', v, 'CENT', 'X'))
-            cy = float(m.get('CENTY', 'VOLU', v, 'CENT', 'Y'))
-
-            # Check if centroid is in fiber region
-            if x1 < cx < x2 and y1 < cy < y2:
-                mat_id = 2  # Fiber
-            else:
-                mat_id = 1  # Matrix
-
+        # Create, assign material, and mesh each volume
+        for i, (xs, xe, ys, ye, mat_id) in enumerate(regions):
+            m.block(xs, xe, ys, ye, 0, L)
+            vol_num = i + 1
+            m.lsel('S', 'VOLU', '', vol_num)
+            m.lesize('ALL', '', '', n_div)
+            m.vsel('S', 'VOLU', '', vol_num)
             m.vatt(mat_id, '', 1)
-            m.vmesh(v)
+            m.vmesh(vol_num)
 
         m.allsel()
 

@@ -269,6 +269,59 @@ class AdvancedCompositeCalculator:
         m.cp(cp_set_num, dof, 'ALL')
         m.allsel()
 
+    def _couple_all_planes(self, direction, dof, start_cp_num):
+        """
+        Couple all nodes at each unique coordinate value in the specified direction.
+
+        This ensures that all parallel planes remain flat like in a homogeneous material.
+        For example, if direction='X' and dof='UX', all nodes with the same X coordinate
+        will have the same UX displacement, keeping each YZ-plane flat.
+
+        Parameters
+        ----------
+        direction : str
+            Coordinate direction ('X', 'Y', or 'Z')
+        dof : str
+            Degree of freedom to couple (UX, UY, or UZ)
+        start_cp_num : int
+            Starting coupled set number
+
+        Returns
+        -------
+        int
+            Next available coupled set number
+        """
+        m = self.mapdl
+        L = self.L
+        tol = 1e-6
+
+        # Get all nodes and their coordinates
+        m.nsel('ALL')
+        all_nodes = m.mesh.nodes  # shape (n_nodes, 3)
+        node_nums = m.mesh.nnum
+
+        # Get coordinate index
+        coord_idx = {'X': 0, 'Y': 1, 'Z': 2}[direction]
+        coords = all_nodes[:, coord_idx]
+
+        # Find unique coordinate values (rounded to avoid floating point issues)
+        unique_coords = np.unique(np.round(coords, 6))
+
+        cp_num = start_cp_num
+        for coord in unique_coords:
+            # Select all nodes at this coordinate
+            m.nsel('S', 'LOC', direction, coord - tol, coord + tol)
+            n_selected = int(m.get('NCOUNT', 'NODE', '', 'COUNT'))
+
+            # Only couple if more than one node
+            if n_selected > 1:
+                m.cp(cp_num, dof, 'ALL')
+                cp_num += 1
+
+            m.allsel()
+
+        return cp_num
+
     def apply_bc_uniaxial_x(self, strain_val=0.001):
         """
         Apply KUBC boundary conditions for uniaxial strain in X direction (for Ex).
@@ -276,8 +329,8 @@ class AdvancedCompositeCalculator:
         Boundary conditions:
         - X=0 face: Ux=0 (fixed in loading direction)
         - X=L face: Ux=ε*L (displacement load)
-        - Y=0, Y=L faces: All nodes have same Uy (coupled - plane remains flat)
-        - Z=0, Z=L faces: All nodes have same Uz (coupled - plane remains flat)
+        - All YZ-planes (every Y coordinate): nodes have same UY (planes remain flat)
+        - All XY-planes (every Z coordinate): nodes have same UZ (planes remain flat)
         - Rigid body constraint: Corner node Uy=Uz=0
         """
         m = self.mapdl
@@ -297,17 +350,11 @@ class AdvancedCompositeCalculator:
         m.d('ALL', 'UX', strain_val * L)
         m.allsel()
 
-        # Y faces: Couple UY so all nodes have same UY (plane remains flat)
-        self._couple_face_dof('YNEG', 'UY', cp_num)
-        cp_num += 1
-        self._couple_face_dof('YPOS', 'UY', cp_num)
-        cp_num += 1
+        # Couple all Y-planes: All nodes at same Y have same UY (plane remains flat)
+        cp_num = self._couple_all_planes('Y', 'UY', cp_num)
 
-        # Z faces: Couple UZ so all nodes have same UZ (plane remains flat)
-        self._couple_face_dof('ZNEG', 'UZ', cp_num)
-        cp_num += 1
-        self._couple_face_dof('ZPOS', 'UZ', cp_num)
-        cp_num += 1
+        # Couple all Z-planes: All nodes at same Z have same UZ (plane remains flat)
+        cp_num = self._couple_all_planes('Z', 'UZ', cp_num)
 
         # Rigid body constraints - fix corner node in Y and Z only
         m.d(self.corner_node, 'UY', 0)
@@ -323,8 +370,8 @@ class AdvancedCompositeCalculator:
         Boundary conditions:
         - Y=0 face: Uy=0 (fixed in loading direction)
         - Y=L face: Uy=ε*L (displacement load)
-        - X=0, X=L faces: All nodes have same Ux (coupled)
-        - Z=0, Z=L faces: All nodes have same Uz (coupled)
+        - All YZ-planes (every X coordinate): nodes have same UX (planes remain flat)
+        - All XY-planes (every Z coordinate): nodes have same UZ (planes remain flat)
         - Rigid body constraint: Corner node Ux=Uz=0
         """
         m = self.mapdl
@@ -344,17 +391,11 @@ class AdvancedCompositeCalculator:
         m.d('ALL', 'UY', strain_val * L)
         m.allsel()
 
-        # X faces: Couple UX
-        self._couple_face_dof('XNEG', 'UX', cp_num)
-        cp_num += 1
-        self._couple_face_dof('XPOS', 'UX', cp_num)
-        cp_num += 1
+        # Couple all X-planes: All nodes at same X have same UX (plane remains flat)
+        cp_num = self._couple_all_planes('X', 'UX', cp_num)
 
-        # Z faces: Couple UZ
-        self._couple_face_dof('ZNEG', 'UZ', cp_num)
-        cp_num += 1
-        self._couple_face_dof('ZPOS', 'UZ', cp_num)
-        cp_num += 1
+        # Couple all Z-planes: All nodes at same Z have same UZ (plane remains flat)
+        cp_num = self._couple_all_planes('Z', 'UZ', cp_num)
 
         # Rigid body constraints
         m.d(self.corner_node, 'UX', 0)
@@ -370,8 +411,8 @@ class AdvancedCompositeCalculator:
         Boundary conditions:
         - Z=0 face: Uz=0 (fixed in loading direction)
         - Z=L face: Uz=ε*L (displacement load)
-        - X=0, X=L faces: All nodes have same Ux (coupled)
-        - Y=0, Y=L faces: All nodes have same Uy (coupled)
+        - All YZ-planes (every X coordinate): nodes have same UX (planes remain flat)
+        - All XZ-planes (every Y coordinate): nodes have same UY (planes remain flat)
         - Rigid body constraint: Corner node Ux=Uy=0
         """
         m = self.mapdl
@@ -391,17 +432,11 @@ class AdvancedCompositeCalculator:
         m.d('ALL', 'UZ', strain_val * L)
         m.allsel()
 
-        # X faces: Couple UX
-        self._couple_face_dof('XNEG', 'UX', cp_num)
-        cp_num += 1
-        self._couple_face_dof('XPOS', 'UX', cp_num)
-        cp_num += 1
+        # Couple all X-planes: All nodes at same X have same UX (plane remains flat)
+        cp_num = self._couple_all_planes('X', 'UX', cp_num)
 
-        # Y faces: Couple UY
-        self._couple_face_dof('YNEG', 'UY', cp_num)
-        cp_num += 1
-        self._couple_face_dof('YPOS', 'UY', cp_num)
-        cp_num += 1
+        # Couple all Y-planes: All nodes at same Y have same UY (plane remains flat)
+        cp_num = self._couple_all_planes('Y', 'UY', cp_num)
 
         # Rigid body constraints
         m.d(self.corner_node, 'UX', 0)
@@ -415,10 +450,10 @@ class AdvancedCompositeCalculator:
         Apply KUBC boundary conditions for shear strain in XY plane (for Gxy).
 
         Boundary conditions:
-        - Y=0 face: Ux=0 (fixed in transverse direction)
+        - Y=0 face: Ux=0, Uy=0 (fixed in transverse direction)
         - Y=L face: Ux=γ*L (shear displacement)
-        - X=0, X=L faces: All nodes have same Uy (plane remains flat)
-        - Z=0, Z=L faces: All nodes have same Uz (plane remains flat)
+        - All XZ-planes (every Y coordinate): nodes have same UY (planes remain flat)
+        - All XY-planes (every Z coordinate): nodes have same UZ (planes remain flat)
         - Rigid body constraints
         """
         m = self.mapdl
@@ -438,21 +473,12 @@ class AdvancedCompositeCalculator:
         m.cmsel('S', 'YPOS')
         m.d('ALL', 'UX', strain_val * L)
         m.allsel()
-        # Couple UY on YPOS to keep plane flat
-        self._couple_face_dof('YPOS', 'UY', cp_num)
-        cp_num += 1
 
-        # X faces: Couple UY to keep planes flat
-        self._couple_face_dof('XNEG', 'UY', cp_num)
-        cp_num += 1
-        self._couple_face_dof('XPOS', 'UY', cp_num)
-        cp_num += 1
+        # Couple all Y-planes: All nodes at same Y have same UY (plane remains flat)
+        cp_num = self._couple_all_planes('Y', 'UY', cp_num)
 
-        # Z faces: Couple UZ to keep planes flat
-        self._couple_face_dof('ZNEG', 'UZ', cp_num)
-        cp_num += 1
-        self._couple_face_dof('ZPOS', 'UZ', cp_num)
-        cp_num += 1
+        # Couple all Z-planes: All nodes at same Z have same UZ (plane remains flat)
+        cp_num = self._couple_all_planes('Z', 'UZ', cp_num)
 
         # Rigid body constraint - fix corner node in Z
         m.d(self.corner_node, 'UZ', 0)
@@ -465,10 +491,10 @@ class AdvancedCompositeCalculator:
         Apply KUBC boundary conditions for shear strain in YZ plane (for Gyz).
 
         Boundary conditions:
-        - Z=0 face: Uy=0 (fixed in transverse direction)
+        - Z=0 face: Uy=0, Uz=0 (fixed in transverse direction)
         - Z=L face: Uy=γ*L (shear displacement)
-        - Y=0, Y=L faces: All nodes have same Uz (plane remains flat)
-        - X=0, X=L faces: All nodes have same Ux (plane remains flat)
+        - All XY-planes (every Z coordinate): nodes have same UZ (planes remain flat)
+        - All YZ-planes (every X coordinate): nodes have same UX (planes remain flat)
         - Rigid body constraints
         """
         m = self.mapdl
@@ -488,21 +514,12 @@ class AdvancedCompositeCalculator:
         m.cmsel('S', 'ZPOS')
         m.d('ALL', 'UY', strain_val * L)
         m.allsel()
-        # Couple UZ on ZPOS to keep plane flat
-        self._couple_face_dof('ZPOS', 'UZ', cp_num)
-        cp_num += 1
 
-        # Y faces: Couple UZ to keep planes flat
-        self._couple_face_dof('YNEG', 'UZ', cp_num)
-        cp_num += 1
-        self._couple_face_dof('YPOS', 'UZ', cp_num)
-        cp_num += 1
+        # Couple all Z-planes: All nodes at same Z have same UZ (plane remains flat)
+        cp_num = self._couple_all_planes('Z', 'UZ', cp_num)
 
-        # X faces: Couple UX to keep planes flat
-        self._couple_face_dof('XNEG', 'UX', cp_num)
-        cp_num += 1
-        self._couple_face_dof('XPOS', 'UX', cp_num)
-        cp_num += 1
+        # Couple all X-planes: All nodes at same X have same UX (plane remains flat)
+        cp_num = self._couple_all_planes('X', 'UX', cp_num)
 
         # Rigid body constraint
         m.d(self.corner_node, 'UX', 0)
@@ -515,10 +532,10 @@ class AdvancedCompositeCalculator:
         Apply KUBC boundary conditions for shear strain in ZX plane (for Gzx).
 
         Boundary conditions:
-        - X=0 face: Uz=0 (fixed in transverse direction)
+        - X=0 face: Uz=0, Ux=0 (fixed in transverse direction)
         - X=L face: Uz=γ*L (shear displacement)
-        - Z=0, Z=L faces: All nodes have same Ux (plane remains flat)
-        - Y=0, Y=L faces: All nodes have same Uy (plane remains flat)
+        - All YZ-planes (every X coordinate): nodes have same UX (planes remain flat)
+        - All XZ-planes (every Y coordinate): nodes have same UY (planes remain flat)
         - Rigid body constraints
         """
         m = self.mapdl
@@ -538,21 +555,12 @@ class AdvancedCompositeCalculator:
         m.cmsel('S', 'XPOS')
         m.d('ALL', 'UZ', strain_val * L)
         m.allsel()
-        # Couple UX on XPOS to keep plane flat
-        self._couple_face_dof('XPOS', 'UX', cp_num)
-        cp_num += 1
 
-        # Z faces: Couple UX to keep planes flat
-        self._couple_face_dof('ZNEG', 'UX', cp_num)
-        cp_num += 1
-        self._couple_face_dof('ZPOS', 'UX', cp_num)
-        cp_num += 1
+        # Couple all X-planes: All nodes at same X have same UX (plane remains flat)
+        cp_num = self._couple_all_planes('X', 'UX', cp_num)
 
-        # Y faces: Couple UY to keep planes flat
-        self._couple_face_dof('YNEG', 'UY', cp_num)
-        cp_num += 1
-        self._couple_face_dof('YPOS', 'UY', cp_num)
-        cp_num += 1
+        # Couple all Y-planes: All nodes at same Y have same UY (plane remains flat)
+        cp_num = self._couple_all_planes('Y', 'UY', cp_num)
 
         # Rigid body constraint
         m.d(self.corner_node, 'UY', 0)
@@ -565,7 +573,7 @@ class AdvancedCompositeCalculator:
         Apply thermal loading with KUBC boundary conditions.
 
         For thermal analysis:
-        - All 6 faces have coupled DOF to remain planar
+        - All internal planes have coupled DOF to remain planar (like homogeneous material)
         - Free thermal expansion in all directions
         - Minimal rigid body constraints
         """
@@ -575,24 +583,15 @@ class AdvancedCompositeCalculator:
 
         cp_num = 1
 
-        # Couple all faces to remain planar during thermal expansion
-        # X faces: Couple UX
-        self._couple_face_dof('XNEG', 'UX', cp_num)
-        cp_num += 1
-        self._couple_face_dof('XPOS', 'UX', cp_num)
-        cp_num += 1
+        # Couple all planes to remain planar during thermal expansion
+        # All YZ-planes (every X coordinate): nodes have same UX
+        cp_num = self._couple_all_planes('X', 'UX', cp_num)
 
-        # Y faces: Couple UY
-        self._couple_face_dof('YNEG', 'UY', cp_num)
-        cp_num += 1
-        self._couple_face_dof('YPOS', 'UY', cp_num)
-        cp_num += 1
+        # All XZ-planes (every Y coordinate): nodes have same UY
+        cp_num = self._couple_all_planes('Y', 'UY', cp_num)
 
-        # Z faces: Couple UZ
-        self._couple_face_dof('ZNEG', 'UZ', cp_num)
-        cp_num += 1
-        self._couple_face_dof('ZPOS', 'UZ', cp_num)
-        cp_num += 1
+        # All XY-planes (every Z coordinate): nodes have same UZ
+        cp_num = self._couple_all_planes('Z', 'UZ', cp_num)
 
         # Minimal rigid body constraints - fix corner node completely
         m.d(self.corner_node, 'UX', 0)
@@ -602,8 +601,10 @@ class AdvancedCompositeCalculator:
         m.allsel()
 
         # Apply thermal load
-        m.bfunif('TEMP', delta_T)
-        m.tunif(0)  # Reference temperature
+        # IMPORTANT: tref sets the reference temperature, tunif sets current uniform temp
+        # For thermal expansion: strain = alpha * (T - Tref)
+        m.tref(0)  # Reference temperature = 0
+        m.bfunif('TEMP', delta_T)  # Current temperature = delta_T
 
         print(f"    Applied thermal BC (ΔT={delta_T}°C)")
 

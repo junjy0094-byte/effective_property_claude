@@ -407,13 +407,22 @@ class CompositeEffectivePropertyCalculator:
         mapdl.bfunif('TEMP', delta_T)
         mapdl.tunif(0)  # Reference temperature = 0
 
-    def solve(self):
-        """Solve the current load case."""
+    def solve(self, jobname=None):
+        """Solve the current load case and optionally save result file."""
         mapdl = self.mapdl
+
+        # Set jobname for this load case if provided
+        if jobname:
+            mapdl.finish()
+            mapdl.filname(jobname)
+
         mapdl.run('/SOLU')
         mapdl.antype('STATIC')
         mapdl.solve()
         mapdl.finish()
+
+        if jobname:
+            print(f"    Result saved: {jobname}.rst")
 
     def get_volume_average_stress(self):
         """Calculate volume-averaged stress from the solution."""
@@ -504,6 +513,7 @@ class CompositeEffectivePropertyCalculator:
         print("\n" + "="*60)
         print("COMPOSITE EFFECTIVE PROPERTY CALCULATION")
         print("="*60)
+        print(f"Result files will be saved in: {self.mapdl.directory}")
 
         # Build model
         self.create_geometry()
@@ -517,53 +527,53 @@ class CompositeEffectivePropertyCalculator:
         # Load case 1: Uniaxial strain in X
         print("\nLoad Case 1: Uniaxial strain εxx...")
         self.apply_periodic_bc_uniaxial_x(strain_val)
-        self.solve()
+        self.solve(jobname='LC1_uniaxial_X')
         stress1 = self.get_volume_average_stress()
         C[0, 0] = stress1['SX'] / strain_val
         C[1, 0] = stress1['SY'] / strain_val
         C[2, 0] = stress1['SZ'] / strain_val
 
         # Load case 2: Uniaxial strain in Y
-        print("Load Case 2: Uniaxial strain εyy...")
+        print("\nLoad Case 2: Uniaxial strain εyy...")
         self.mapdl.prep7()
         self.apply_periodic_bc_uniaxial_y(strain_val)
-        self.solve()
+        self.solve(jobname='LC2_uniaxial_Y')
         stress2 = self.get_volume_average_stress()
         C[0, 1] = stress2['SX'] / strain_val
         C[1, 1] = stress2['SY'] / strain_val
         C[2, 1] = stress2['SZ'] / strain_val
 
         # Load case 3: Uniaxial strain in Z
-        print("Load Case 3: Uniaxial strain εzz...")
+        print("\nLoad Case 3: Uniaxial strain εzz...")
         self.mapdl.prep7()
         self.apply_periodic_bc_uniaxial_z(strain_val)
-        self.solve()
+        self.solve(jobname='LC3_uniaxial_Z')
         stress3 = self.get_volume_average_stress()
         C[0, 2] = stress3['SX'] / strain_val
         C[1, 2] = stress3['SY'] / strain_val
         C[2, 2] = stress3['SZ'] / strain_val
 
         # Load case 4: Shear strain XY
-        print("Load Case 4: Shear strain γxy...")
+        print("\nLoad Case 4: Shear strain γxy...")
         self.mapdl.prep7()
         self.apply_periodic_bc_shear_xy(strain_val)
-        self.solve()
+        self.solve(jobname='LC4_shear_XY')
         stress4 = self.get_volume_average_stress()
         C[3, 3] = stress4['SXY'] / strain_val
 
         # Load case 5: Shear strain YZ
-        print("Load Case 5: Shear strain γyz...")
+        print("\nLoad Case 5: Shear strain γyz...")
         self.mapdl.prep7()
         self.apply_periodic_bc_shear_yz(strain_val)
-        self.solve()
+        self.solve(jobname='LC5_shear_YZ')
         stress5 = self.get_volume_average_stress()
         C[4, 4] = stress5['SYZ'] / strain_val
 
         # Load case 6: Shear strain ZX
-        print("Load Case 6: Shear strain γzx...")
+        print("\nLoad Case 6: Shear strain γzx...")
         self.mapdl.prep7()
         self.apply_periodic_bc_shear_zx(strain_val)
-        self.solve()
+        self.solve(jobname='LC6_shear_ZX')
         stress6 = self.get_volume_average_stress()
         C[5, 5] = stress6['SXZ'] / strain_val
 
@@ -595,7 +605,7 @@ class CompositeEffectivePropertyCalculator:
         self.mapdl.prep7()
         delta_T = 1.0
         self.apply_thermal_load(delta_T)
-        self.solve()
+        self.solve(jobname='LC7_thermal')
 
         # Get displacements on positive faces
         ux = self.get_face_displacement('X_POS')

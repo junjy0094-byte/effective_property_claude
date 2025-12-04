@@ -1,27 +1,29 @@
 """
 Advanced Composite Material Effective Property Calculator using PyANSYS
 
-This version implements proper periodic boundary conditions using constraint equations (CE),
-following ANSYS Material Designer methodology for RVE homogenization.
+This version implements Kinematic Uniform Boundary Conditions (KUBC) for RVE homogenization.
+KUBC ensures that each face remains planar while allowing free lateral contraction/expansion,
+which correctly models the behavior of a homogenized material.
 
 Key features:
 1. Square prism fiber geometry (for compatible hex meshing)
 2. SOLID185 hex elements with matching meshes on opposite faces
-3. Periodic boundary conditions via CE (constraint equations) with master nodes
+3. KUBC boundary conditions using Coupled DOF (CP command)
 4. Volume-averaged stress and strain for effective property computation
 
-Periodic BC formulation:
-    u(x+) - u(x-) = ε̄ · Δx
+KUBC formulation for Ex calculation:
+    - X=0 face: Ux=0 (fixed in loading direction)
+    - X=L face: Ux=ε*L (displacement load)
+    - Y=0, Y=L faces: All nodes have same Uy (coupled DOF - plane remains flat)
+    - Z=0, Z=L faces: All nodes have same Uz (coupled DOF - plane remains flat)
+    - Minimal rigid body constraints (one node fixed in Uy, Uz)
 
-where:
-    - u(x+), u(x-) are displacements on opposite faces
-    - ε̄ is the macroscopic strain tensor
-    - Δx is the distance vector between faces
+This approach allows proper Poisson contraction while maintaining plane faces,
+matching the behavior of a homogenized material under uniaxial loading.
 
 Reference:
-- Xia, Z., Zhou, C., Yong, Q., Wang, X. (2006). "On selection of repeated unit cell
-  model and application of unified periodic boundary conditions"
-- ANSYS Material Designer Theory Guide
+- Suquet, P. (1987). "Elements of homogenization for inelastic solid mechanics"
+- Hill, R. (1963). "Elastic properties of reinforced solids"
 """
 
 import numpy as np
@@ -30,10 +32,10 @@ from ansys.mapdl.core import launch_mapdl
 
 class AdvancedCompositeCalculator:
     """
-    Advanced calculator for effective material properties using proper periodic BC.
+    Advanced calculator for effective material properties using KUBC.
 
-    Uses master nodes and constraint equations (CE) to enforce periodic boundary
-    conditions, which is the same approach used in ANSYS Material Designer.
+    Uses Kinematic Uniform Boundary Conditions (KUBC) with Coupled DOF
+    to ensure plane faces while allowing free lateral contraction.
     """
 
     def __init__(self, rve_size=1.0, fiber_vf=0.10):
@@ -62,8 +64,8 @@ class AdvancedCompositeCalculator:
         }
 
         self.mapdl = None
-        self.master_nodes = {}  # Master nodes for periodic BC
-        self.node_pairs = {}    # Corresponding node pairs on opposite faces
+        self.face_nodes = {}    # Node lists for each face
+        self.corner_node = None # Corner node at origin for rigid body constraints
         self.stiffness_matrix = None
         self.compliance_matrix = None
         self.effective_props = {}
@@ -186,27 +188,24 @@ class AdvancedCompositeCalculator:
         ne = int(m.get('ECOUNT', 'ELEM', '', 'COUNT'))
         print(f"Mesh: {nn} nodes, {ne} elements")
 
-        # Create face node sets and find node pairs
-        self._create_face_sets_and_pairs()
+        # Create face node sets for KUBC
+        self._create_face_sets()
 
-        # Create master nodes for periodic BC
-        self._create_master_nodes()
-
-        # Save DB after node pairs and master nodes
-        m.save('step3_node_pairs_master')
-        print("  Saved: step3_node_pairs_master.db")
+        # Save DB after face sets
+        m.save('step3_face_sets')
+        print("  Saved: step3_face_sets.db")
 
         print("Model built successfully")
 
-    def _create_face_sets_and_pairs(self):
-        """Create node sets for faces and find corresponding node pairs."""
+    def _create_face_sets(self):
+        """Create node sets for each face and identify corner node."""
         m = self.mapdl
         L = self.L
         tol = 1e-6
 
-        print("  Creating face node sets and finding node pairs...")
+        print("  Creating face node sets for KUBC...")
 
-        # Create face component sets
+        # Create face component sets and store node lists
         faces = [
             ('XNEG', 'X', 0),
             ('XPOS', 'X', L),
@@ -216,255 +215,397 @@ class AdvancedCompositeCalculator:
             ('ZPOS', 'Z', L),
         ]
 
+        self.face_nodes = {}
         for name, direction, coord in faces:
             m.nsel('S', 'LOC', direction, coord - tol, coord + tol)
             m.cm(name, 'NODE')
+            # Store node list for this face
+            self.face_nodes[name] = m.mesh.nnum.copy()
 
         m.allsel()
 
-        # Get all node coordinates
-        nodes = m.mesh.nodes
-        node_nums = m.mesh.nnum
+        # Find corner node at origin (0, 0, 0) for rigid body constraints
+        m.nsel('S', 'LOC', 'X', 0, tol)
+        m.nsel('R', 'LOC', 'Y', 0, tol)
+        m.nsel('R', 'LOC', 'Z', 0, tol)
+        corner_nodes = m.mesh.nnum
+        if len(corner_nodes) > 0:
+            self.corner_node = int(corner_nodes[0])
+        else:
+            # Fallback: find any node on XNEG face
+            self.corner_node = int(self.face_nodes['XNEG'][0])
+        m.allsel()
 
-        # Create mapping from coordinates to node numbers
-        coord_to_node = {}
-        for i, nnum in enumerate(node_nums):
-            x, y, z = nodes[i]
-            key = (round(x, 5), round(y, 5), round(z, 5))
-            coord_to_node[key] = nnum
+        print(f"    XNEG: {len(self.face_nodes['XNEG'])} nodes")
+        print(f"    XPOS: {len(self.face_nodes['XPOS'])} nodes")
+        print(f"    YNEG: {len(self.face_nodes['YNEG'])} nodes")
+        print(f"    YPOS: {len(self.face_nodes['YPOS'])} nodes")
+        print(f"    ZNEG: {len(self.face_nodes['ZNEG'])} nodes")
+        print(f"    ZPOS: {len(self.face_nodes['ZPOS'])} nodes")
+        print(f"    Corner node (origin): {self.corner_node}")
 
-        # Find corresponding node pairs on opposite faces
-        self.node_pairs = {'X': [], 'Y': [], 'Z': []}
-
-        # X-direction pairs (XPOS to XNEG)
-        for i, nnum in enumerate(node_nums):
-            x, y, z = nodes[i]
-            if abs(x - L) < tol:  # Node on XPOS
-                # Find corresponding node on XNEG
-                key_neg = (round(0, 5), round(y, 5), round(z, 5))
-                if key_neg in coord_to_node:
-                    node_neg = coord_to_node[key_neg]
-                    self.node_pairs['X'].append((nnum, node_neg))
-
-        # Y-direction pairs (YPOS to YNEG)
-        for i, nnum in enumerate(node_nums):
-            x, y, z = nodes[i]
-            if abs(y - L) < tol:  # Node on YPOS
-                key_neg = (round(x, 5), round(0, 5), round(z, 5))
-                if key_neg in coord_to_node:
-                    node_neg = coord_to_node[key_neg]
-                    self.node_pairs['Y'].append((nnum, node_neg))
-
-        # Z-direction pairs (ZPOS to ZNEG)
-        for i, nnum in enumerate(node_nums):
-            x, y, z = nodes[i]
-            if abs(z - L) < tol:  # Node on ZPOS
-                key_neg = (round(x, 5), round(y, 5), round(0, 5))
-                if key_neg in coord_to_node:
-                    node_neg = coord_to_node[key_neg]
-                    self.node_pairs['Z'].append((nnum, node_neg))
-
-        print(f"    X-pairs: {len(self.node_pairs['X'])}")
-        print(f"    Y-pairs: {len(self.node_pairs['Y'])}")
-        print(f"    Z-pairs: {len(self.node_pairs['Z'])}")
-
-    def _create_master_nodes(self):
-        """
-        Create master (reference) nodes for periodic boundary conditions.
-
-        Three master nodes are created, each controlling the displacement gradient
-        in one direction:
-        - Master X: controls ∂u/∂x (UX=ε11*L, UY=ε21*L, UZ=ε31*L)
-        - Master Y: controls ∂u/∂y (UX=ε12*L, UY=ε22*L, UZ=ε32*L)
-        - Master Z: controls ∂u/∂z (UX=ε13*L, UY=ε23*L, UZ=ε33*L)
-        """
+    def _clear_all_constraints(self):
+        """Clear all displacement constraints and coupled DOFs."""
         m = self.mapdl
-        L = self.L
+        m.ddele('ALL', 'ALL')
+        m.run('CPDELE,ALL')
+        m.run('CEDELE,ALL')
 
-        print("  Creating master nodes for periodic BC...")
-
-        # Get the highest existing node number
-        max_node = int(m.get('NMAX', 'NODE', '', 'NUM', 'MAX'))
-
-        # Create 3 master nodes at arbitrary locations outside RVE
-        # These nodes only provide DOFs, their location doesn't matter
-        self.master_nodes = {
-            'X': max_node + 1,
-            'Y': max_node + 2,
-            'Z': max_node + 3,
-        }
-
-        m.n(self.master_nodes['X'], L * 2, 0, 0)
-        m.n(self.master_nodes['Y'], L * 2, L, 0)
-        m.n(self.master_nodes['Z'], L * 2, L * 2, 0)
-
-        print(f"    Master nodes: X={self.master_nodes['X']}, Y={self.master_nodes['Y']}, Z={self.master_nodes['Z']}")
-
-    def apply_periodic_bc(self, eps_macro):
+    def _couple_face_dof(self, face_name, dof, cp_set_num):
         """
-        Apply periodic boundary conditions for a given macroscopic strain.
-
-        Uses constraint equations (CE) to enforce:
-            u(x+) - u(x-) = ε̄ · Δx
+        Couple all nodes on a face to have the same displacement in specified DOF.
 
         Parameters
         ----------
-        eps_macro : array-like
-            Macroscopic strain tensor in Voigt notation [ε11, ε22, ε33, γ12, γ23, γ31]
-            Note: γ12 = 2*ε12 (engineering shear strain)
+        face_name : str
+            Name of face component (XNEG, XPOS, YNEG, YPOS, ZNEG, ZPOS)
+        dof : str
+            Degree of freedom to couple (UX, UY, or UZ)
+        cp_set_num : int
+            Coupled set number for ANSYS CP command
+        """
+        m = self.mapdl
+        m.cmsel('S', face_name)
+        m.cp(cp_set_num, dof, 'ALL')
+        m.allsel()
+
+    def apply_bc_uniaxial_x(self, strain_val=0.001):
+        """
+        Apply KUBC boundary conditions for uniaxial strain in X direction (for Ex).
+
+        Boundary conditions:
+        - X=0 face: Ux=0 (fixed in loading direction)
+        - X=L face: Ux=ε*L (displacement load)
+        - Y=0, Y=L faces: All nodes have same Uy (coupled - plane remains flat)
+        - Z=0, Z=L faces: All nodes have same Uz (coupled - plane remains flat)
+        - Rigid body constraint: Corner node Uy=Uz=0
         """
         m = self.mapdl
         L = self.L
 
-        e11, e22, e33, g12, g23, g31 = eps_macro
-        # Convert engineering shear strain to tensor shear strain
-        e12 = g12 / 2
-        e23 = g23 / 2
-        e31 = g31 / 2
+        self._clear_all_constraints()
 
-        # Clear all previous constraints
-        m.ddele('ALL', 'ALL')
-        m.cedele('ALL')
+        cp_num = 1  # Coupled DOF set counter
 
-        # Delete any constraint equations from previous load case
-        m.run('CEDELE,ALL')
+        # X=0 face: Fixed in X direction
+        m.cmsel('S', 'XNEG')
+        m.d('ALL', 'UX', 0)
+        m.allsel()
 
-        # Counter for constraint equations
-        ce_num = 1
+        # X=L face: Applied displacement
+        m.cmsel('S', 'XPOS')
+        m.d('ALL', 'UX', strain_val * L)
+        m.allsel()
 
-        # Apply periodic BC via constraint equations
-        # For each pair of nodes on opposite faces:
-        # u_pos - u_neg = Master_DOF
-        # CE format: CE,NEQN,CONST,NODE1,Lab1,C1,NODE2,Lab2,C2,...
-        # CONST + C1*u1 + C2*u2 + ... = 0
+        # Y faces: Couple UY so all nodes have same UY (plane remains flat)
+        self._couple_face_dof('YNEG', 'UY', cp_num)
+        cp_num += 1
+        self._couple_face_dof('YPOS', 'UY', cp_num)
+        cp_num += 1
 
-        # X-direction periodicity (XPOS - XNEG)
-        # u(L,y,z) - u(0,y,z) = [e11, e12, e31]^T * L
-        for node_pos, node_neg in self.node_pairs['X']:
-            # UX: u_pos - u_neg - Master_X.UX = 0
-            m.ce(ce_num, 0, node_pos, 'UX', 1, node_neg, 'UX', -1, self.master_nodes['X'], 'UX', -1)
-            ce_num += 1
-            # UY: u_pos - u_neg - Master_X.UY = 0
-            m.ce(ce_num, 0, node_pos, 'UY', 1, node_neg, 'UY', -1, self.master_nodes['X'], 'UY', -1)
-            ce_num += 1
-            # UZ: u_pos - u_neg - Master_X.UZ = 0
-            m.ce(ce_num, 0, node_pos, 'UZ', 1, node_neg, 'UZ', -1, self.master_nodes['X'], 'UZ', -1)
-            ce_num += 1
+        # Z faces: Couple UZ so all nodes have same UZ (plane remains flat)
+        self._couple_face_dof('ZNEG', 'UZ', cp_num)
+        cp_num += 1
+        self._couple_face_dof('ZPOS', 'UZ', cp_num)
+        cp_num += 1
 
-        # Y-direction periodicity (YPOS - YNEG)
-        # u(x,L,z) - u(x,0,z) = [e12, e22, e23]^T * L
-        for node_pos, node_neg in self.node_pairs['Y']:
-            m.ce(ce_num, 0, node_pos, 'UX', 1, node_neg, 'UX', -1, self.master_nodes['Y'], 'UX', -1)
-            ce_num += 1
-            m.ce(ce_num, 0, node_pos, 'UY', 1, node_neg, 'UY', -1, self.master_nodes['Y'], 'UY', -1)
-            ce_num += 1
-            m.ce(ce_num, 0, node_pos, 'UZ', 1, node_neg, 'UZ', -1, self.master_nodes['Y'], 'UZ', -1)
-            ce_num += 1
-
-        # Z-direction periodicity (ZPOS - ZNEG)
-        # u(x,y,L) - u(x,y,0) = [e31, e23, e33]^T * L
-        for node_pos, node_neg in self.node_pairs['Z']:
-            m.ce(ce_num, 0, node_pos, 'UX', 1, node_neg, 'UX', -1, self.master_nodes['Z'], 'UX', -1)
-            ce_num += 1
-            m.ce(ce_num, 0, node_pos, 'UY', 1, node_neg, 'UY', -1, self.master_nodes['Z'], 'UY', -1)
-            ce_num += 1
-            m.ce(ce_num, 0, node_pos, 'UZ', 1, node_neg, 'UZ', -1, self.master_nodes['Z'], 'UZ', -1)
-            ce_num += 1
-
-        print(f"    Created {ce_num-1} constraint equations")
-
-        # Apply displacements to master nodes to impose macroscopic strain
-        # Master X: gradient in X direction
-        m.d(self.master_nodes['X'], 'UX', e11 * L)
-        m.d(self.master_nodes['X'], 'UY', e12 * L)
-        m.d(self.master_nodes['X'], 'UZ', e31 * L)
-
-        # Master Y: gradient in Y direction
-        m.d(self.master_nodes['Y'], 'UX', e12 * L)
-        m.d(self.master_nodes['Y'], 'UY', e22 * L)
-        m.d(self.master_nodes['Y'], 'UZ', e23 * L)
-
-        # Master Z: gradient in Z direction
-        m.d(self.master_nodes['Z'], 'UX', e31 * L)
-        m.d(self.master_nodes['Z'], 'UY', e23 * L)
-        m.d(self.master_nodes['Z'], 'UZ', e33 * L)
-
-        # Fix one corner node to prevent rigid body motion
-        # Find the node at origin (0, 0, 0)
-        m.nsel('S', 'LOC', 'X', 0, 1e-6)
-        m.nsel('R', 'LOC', 'Y', 0, 1e-6)
-        m.nsel('R', 'LOC', 'Z', 0, 1e-6)
-        m.d('ALL', 'ALL', 0)
+        # Rigid body constraints - fix corner node in Y and Z only
+        m.d(self.corner_node, 'UY', 0)
+        m.d(self.corner_node, 'UZ', 0)
 
         m.allsel()
+        print(f"    Applied KUBC for Ex (ε11={strain_val})")
+
+    def apply_bc_uniaxial_y(self, strain_val=0.001):
+        """
+        Apply KUBC boundary conditions for uniaxial strain in Y direction (for Ey).
+
+        Boundary conditions:
+        - Y=0 face: Uy=0 (fixed in loading direction)
+        - Y=L face: Uy=ε*L (displacement load)
+        - X=0, X=L faces: All nodes have same Ux (coupled)
+        - Z=0, Z=L faces: All nodes have same Uz (coupled)
+        - Rigid body constraint: Corner node Ux=Uz=0
+        """
+        m = self.mapdl
+        L = self.L
+
+        self._clear_all_constraints()
+
+        cp_num = 1
+
+        # Y=0 face: Fixed in Y direction
+        m.cmsel('S', 'YNEG')
+        m.d('ALL', 'UY', 0)
+        m.allsel()
+
+        # Y=L face: Applied displacement
+        m.cmsel('S', 'YPOS')
+        m.d('ALL', 'UY', strain_val * L)
+        m.allsel()
+
+        # X faces: Couple UX
+        self._couple_face_dof('XNEG', 'UX', cp_num)
+        cp_num += 1
+        self._couple_face_dof('XPOS', 'UX', cp_num)
+        cp_num += 1
+
+        # Z faces: Couple UZ
+        self._couple_face_dof('ZNEG', 'UZ', cp_num)
+        cp_num += 1
+        self._couple_face_dof('ZPOS', 'UZ', cp_num)
+        cp_num += 1
+
+        # Rigid body constraints
+        m.d(self.corner_node, 'UX', 0)
+        m.d(self.corner_node, 'UZ', 0)
+
+        m.allsel()
+        print(f"    Applied KUBC for Ey (ε22={strain_val})")
+
+    def apply_bc_uniaxial_z(self, strain_val=0.001):
+        """
+        Apply KUBC boundary conditions for uniaxial strain in Z direction (for Ez).
+
+        Boundary conditions:
+        - Z=0 face: Uz=0 (fixed in loading direction)
+        - Z=L face: Uz=ε*L (displacement load)
+        - X=0, X=L faces: All nodes have same Ux (coupled)
+        - Y=0, Y=L faces: All nodes have same Uy (coupled)
+        - Rigid body constraint: Corner node Ux=Uy=0
+        """
+        m = self.mapdl
+        L = self.L
+
+        self._clear_all_constraints()
+
+        cp_num = 1
+
+        # Z=0 face: Fixed in Z direction
+        m.cmsel('S', 'ZNEG')
+        m.d('ALL', 'UZ', 0)
+        m.allsel()
+
+        # Z=L face: Applied displacement
+        m.cmsel('S', 'ZPOS')
+        m.d('ALL', 'UZ', strain_val * L)
+        m.allsel()
+
+        # X faces: Couple UX
+        self._couple_face_dof('XNEG', 'UX', cp_num)
+        cp_num += 1
+        self._couple_face_dof('XPOS', 'UX', cp_num)
+        cp_num += 1
+
+        # Y faces: Couple UY
+        self._couple_face_dof('YNEG', 'UY', cp_num)
+        cp_num += 1
+        self._couple_face_dof('YPOS', 'UY', cp_num)
+        cp_num += 1
+
+        # Rigid body constraints
+        m.d(self.corner_node, 'UX', 0)
+        m.d(self.corner_node, 'UY', 0)
+
+        m.allsel()
+        print(f"    Applied KUBC for Ez (ε33={strain_val})")
+
+    def apply_bc_shear_xy(self, strain_val=0.001):
+        """
+        Apply KUBC boundary conditions for shear strain in XY plane (for Gxy).
+
+        Boundary conditions:
+        - Y=0 face: Ux=0 (fixed in transverse direction)
+        - Y=L face: Ux=γ*L (shear displacement)
+        - X=0, X=L faces: All nodes have same Uy (plane remains flat)
+        - Z=0, Z=L faces: All nodes have same Uz (plane remains flat)
+        - Rigid body constraints
+        """
+        m = self.mapdl
+        L = self.L
+
+        self._clear_all_constraints()
+
+        cp_num = 1
+
+        # Y=0 face: Fixed in X direction (transverse)
+        m.cmsel('S', 'YNEG')
+        m.d('ALL', 'UX', 0)
+        m.d('ALL', 'UY', 0)  # Also fix UY to prevent Y-translation
+        m.allsel()
+
+        # Y=L face: Shear displacement in X direction
+        m.cmsel('S', 'YPOS')
+        m.d('ALL', 'UX', strain_val * L)
+        m.allsel()
+        # Couple UY on YPOS to keep plane flat
+        self._couple_face_dof('YPOS', 'UY', cp_num)
+        cp_num += 1
+
+        # X faces: Couple UY to keep planes flat
+        self._couple_face_dof('XNEG', 'UY', cp_num)
+        cp_num += 1
+        self._couple_face_dof('XPOS', 'UY', cp_num)
+        cp_num += 1
+
+        # Z faces: Couple UZ to keep planes flat
+        self._couple_face_dof('ZNEG', 'UZ', cp_num)
+        cp_num += 1
+        self._couple_face_dof('ZPOS', 'UZ', cp_num)
+        cp_num += 1
+
+        # Rigid body constraint - fix corner node in Z
+        m.d(self.corner_node, 'UZ', 0)
+
+        m.allsel()
+        print(f"    Applied KUBC for Gxy (γ12={strain_val})")
+
+    def apply_bc_shear_yz(self, strain_val=0.001):
+        """
+        Apply KUBC boundary conditions for shear strain in YZ plane (for Gyz).
+
+        Boundary conditions:
+        - Z=0 face: Uy=0 (fixed in transverse direction)
+        - Z=L face: Uy=γ*L (shear displacement)
+        - Y=0, Y=L faces: All nodes have same Uz (plane remains flat)
+        - X=0, X=L faces: All nodes have same Ux (plane remains flat)
+        - Rigid body constraints
+        """
+        m = self.mapdl
+        L = self.L
+
+        self._clear_all_constraints()
+
+        cp_num = 1
+
+        # Z=0 face: Fixed in Y direction (transverse)
+        m.cmsel('S', 'ZNEG')
+        m.d('ALL', 'UY', 0)
+        m.d('ALL', 'UZ', 0)  # Also fix UZ
+        m.allsel()
+
+        # Z=L face: Shear displacement in Y direction
+        m.cmsel('S', 'ZPOS')
+        m.d('ALL', 'UY', strain_val * L)
+        m.allsel()
+        # Couple UZ on ZPOS to keep plane flat
+        self._couple_face_dof('ZPOS', 'UZ', cp_num)
+        cp_num += 1
+
+        # Y faces: Couple UZ to keep planes flat
+        self._couple_face_dof('YNEG', 'UZ', cp_num)
+        cp_num += 1
+        self._couple_face_dof('YPOS', 'UZ', cp_num)
+        cp_num += 1
+
+        # X faces: Couple UX to keep planes flat
+        self._couple_face_dof('XNEG', 'UX', cp_num)
+        cp_num += 1
+        self._couple_face_dof('XPOS', 'UX', cp_num)
+        cp_num += 1
+
+        # Rigid body constraint
+        m.d(self.corner_node, 'UX', 0)
+
+        m.allsel()
+        print(f"    Applied KUBC for Gyz (γ23={strain_val})")
+
+    def apply_bc_shear_zx(self, strain_val=0.001):
+        """
+        Apply KUBC boundary conditions for shear strain in ZX plane (for Gzx).
+
+        Boundary conditions:
+        - X=0 face: Uz=0 (fixed in transverse direction)
+        - X=L face: Uz=γ*L (shear displacement)
+        - Z=0, Z=L faces: All nodes have same Ux (plane remains flat)
+        - Y=0, Y=L faces: All nodes have same Uy (plane remains flat)
+        - Rigid body constraints
+        """
+        m = self.mapdl
+        L = self.L
+
+        self._clear_all_constraints()
+
+        cp_num = 1
+
+        # X=0 face: Fixed in Z direction (transverse)
+        m.cmsel('S', 'XNEG')
+        m.d('ALL', 'UZ', 0)
+        m.d('ALL', 'UX', 0)  # Also fix UX
+        m.allsel()
+
+        # X=L face: Shear displacement in Z direction
+        m.cmsel('S', 'XPOS')
+        m.d('ALL', 'UZ', strain_val * L)
+        m.allsel()
+        # Couple UX on XPOS to keep plane flat
+        self._couple_face_dof('XPOS', 'UX', cp_num)
+        cp_num += 1
+
+        # Z faces: Couple UX to keep planes flat
+        self._couple_face_dof('ZNEG', 'UX', cp_num)
+        cp_num += 1
+        self._couple_face_dof('ZPOS', 'UX', cp_num)
+        cp_num += 1
+
+        # Y faces: Couple UY to keep planes flat
+        self._couple_face_dof('YNEG', 'UY', cp_num)
+        cp_num += 1
+        self._couple_face_dof('YPOS', 'UY', cp_num)
+        cp_num += 1
+
+        # Rigid body constraint
+        m.d(self.corner_node, 'UY', 0)
+
+        m.allsel()
+        print(f"    Applied KUBC for Gzx (γ31={strain_val})")
 
     def apply_thermal_bc(self, delta_T=1.0):
         """
-        Apply thermal loading with periodic boundary conditions.
+        Apply thermal loading with KUBC boundary conditions.
 
-        For thermal analysis, the periodic BC ensures uniform expansion
-        without constraint. Master node displacements are left free.
+        For thermal analysis:
+        - All 6 faces have coupled DOF to remain planar
+        - Free thermal expansion in all directions
+        - Minimal rigid body constraints
         """
         m = self.mapdl
-        L = self.L
 
-        # Clear all previous constraints
-        m.ddele('ALL', 'ALL')
-        m.run('CEDELE,ALL')
+        self._clear_all_constraints()
 
-        ce_num = 1
+        cp_num = 1
 
-        # Apply periodic BC with zero prescribed gradient (free expansion)
-        # X-direction periodicity
-        for node_pos, node_neg in self.node_pairs['X']:
-            m.ce(ce_num, 0, node_pos, 'UX', 1, node_neg, 'UX', -1, self.master_nodes['X'], 'UX', -1)
-            ce_num += 1
-            m.ce(ce_num, 0, node_pos, 'UY', 1, node_neg, 'UY', -1, self.master_nodes['X'], 'UY', -1)
-            ce_num += 1
-            m.ce(ce_num, 0, node_pos, 'UZ', 1, node_neg, 'UZ', -1, self.master_nodes['X'], 'UZ', -1)
-            ce_num += 1
+        # Couple all faces to remain planar during thermal expansion
+        # X faces: Couple UX
+        self._couple_face_dof('XNEG', 'UX', cp_num)
+        cp_num += 1
+        self._couple_face_dof('XPOS', 'UX', cp_num)
+        cp_num += 1
 
-        # Y-direction periodicity
-        for node_pos, node_neg in self.node_pairs['Y']:
-            m.ce(ce_num, 0, node_pos, 'UX', 1, node_neg, 'UX', -1, self.master_nodes['Y'], 'UX', -1)
-            ce_num += 1
-            m.ce(ce_num, 0, node_pos, 'UY', 1, node_neg, 'UY', -1, self.master_nodes['Y'], 'UY', -1)
-            ce_num += 1
-            m.ce(ce_num, 0, node_pos, 'UZ', 1, node_neg, 'UZ', -1, self.master_nodes['Y'], 'UZ', -1)
-            ce_num += 1
+        # Y faces: Couple UY
+        self._couple_face_dof('YNEG', 'UY', cp_num)
+        cp_num += 1
+        self._couple_face_dof('YPOS', 'UY', cp_num)
+        cp_num += 1
 
-        # Z-direction periodicity
-        for node_pos, node_neg in self.node_pairs['Z']:
-            m.ce(ce_num, 0, node_pos, 'UX', 1, node_neg, 'UX', -1, self.master_nodes['Z'], 'UX', -1)
-            ce_num += 1
-            m.ce(ce_num, 0, node_pos, 'UY', 1, node_neg, 'UY', -1, self.master_nodes['Z'], 'UY', -1)
-            ce_num += 1
-            m.ce(ce_num, 0, node_pos, 'UZ', 1, node_neg, 'UZ', -1, self.master_nodes['Z'], 'UZ', -1)
-            ce_num += 1
+        # Z faces: Couple UZ
+        self._couple_face_dof('ZNEG', 'UZ', cp_num)
+        cp_num += 1
+        self._couple_face_dof('ZPOS', 'UZ', cp_num)
+        cp_num += 1
 
-        # Fix corner node for rigid body motion
-        m.nsel('S', 'LOC', 'X', 0, 1e-6)
-        m.nsel('R', 'LOC', 'Y', 0, 1e-6)
-        m.nsel('R', 'LOC', 'Z', 0, 1e-6)
-        m.d('ALL', 'ALL', 0)
-
-        # For thermal: constrain shear deformation modes (off-diagonal of master nodes)
-        # but allow normal expansion (diagonal terms are free)
-        m.d(self.master_nodes['X'], 'UY', 0)  # No shear ε12 from thermal
-        m.d(self.master_nodes['X'], 'UZ', 0)  # No shear ε31 from thermal
-        m.d(self.master_nodes['Y'], 'UX', 0)  # No shear ε12 from thermal
-        m.d(self.master_nodes['Y'], 'UZ', 0)  # No shear ε23 from thermal
-        m.d(self.master_nodes['Z'], 'UX', 0)  # No shear ε31 from thermal
-        m.d(self.master_nodes['Z'], 'UY', 0)  # No shear ε23 from thermal
-
-        # Leave UX of Master X, UY of Master Y, UZ of Master Z FREE
-        # These will give us the thermal strains
+        # Minimal rigid body constraints - fix corner node completely
+        m.d(self.corner_node, 'UX', 0)
+        m.d(self.corner_node, 'UY', 0)
+        m.d(self.corner_node, 'UZ', 0)
 
         m.allsel()
 
         # Apply thermal load
         m.bfunif('TEMP', delta_T)
         m.tunif(0)  # Reference temperature
+
+        print(f"    Applied thermal BC (ΔT={delta_T}°C)")
 
     def solve(self, jobname=None):
         """Solve current load case and optionally save result file."""
@@ -538,10 +679,14 @@ class AdvancedCompositeCalculator:
 
     def get_thermal_strain(self, delta_T=1.0):
         """
-        Get effective thermal expansion strains from master node displacements.
+        Get effective thermal expansion strains from face displacements.
 
-        The thermal strains are computed from the master node displacements:
-            ε_th = u_master / L / ΔT
+        The thermal strains are computed from the displacement difference
+        between opposite faces:
+            ε_th = (u_pos - u_neg) / L / ΔT
+
+        With KUBC, all nodes on a face have the same normal displacement (coupled),
+        so we can use any node on each face.
         """
         m = self.mapdl
         L = self.L
@@ -549,33 +694,41 @@ class AdvancedCompositeCalculator:
         m.post1()
         m.set('LAST')
 
-        # Get displacements from master nodes
-        # Master X.UX gives ε11*L, Master Y.UY gives ε22*L, Master Z.UZ gives ε33*L
+        # Get a representative node from each face (first node in the list)
+        node_xpos = int(self.face_nodes['XPOS'][0])
+        node_xneg = int(self.face_nodes['XNEG'][0])
+        node_ypos = int(self.face_nodes['YPOS'][0])
+        node_yneg = int(self.face_nodes['YNEG'][0])
+        node_zpos = int(self.face_nodes['ZPOS'][0])
+        node_zneg = int(self.face_nodes['ZNEG'][0])
 
-        m.nsel('S', 'NODE', '', self.master_nodes['X'])
-        ux_master_x = m.get('UX', 'NODE', self.master_nodes['X'], 'U', 'X')
+        # Get UX on X faces
+        ux_xpos = float(m.get('UX', 'NODE', node_xpos, 'U', 'X'))
+        ux_xneg = float(m.get('UX', 'NODE', node_xneg, 'U', 'X'))
 
-        m.nsel('S', 'NODE', '', self.master_nodes['Y'])
-        uy_master_y = m.get('UY', 'NODE', self.master_nodes['Y'], 'U', 'Y')
+        # Get UY on Y faces
+        uy_ypos = float(m.get('UY', 'NODE', node_ypos, 'U', 'Y'))
+        uy_yneg = float(m.get('UY', 'NODE', node_yneg, 'U', 'Y'))
 
-        m.nsel('S', 'NODE', '', self.master_nodes['Z'])
-        uz_master_z = m.get('UZ', 'NODE', self.master_nodes['Z'], 'U', 'Z')
+        # Get UZ on Z faces
+        uz_zpos = float(m.get('UZ', 'NODE', node_zpos, 'U', 'Z'))
+        uz_zneg = float(m.get('UZ', 'NODE', node_zneg, 'U', 'Z'))
 
         m.allsel()
         m.finish()
 
         # Thermal strains (CTE = strain / delta_T)
         eps_th = np.array([
-            ux_master_x / L / delta_T,
-            uy_master_y / L / delta_T,
-            uz_master_z / L / delta_T
+            (ux_xpos - ux_xneg) / L / delta_T,
+            (uy_ypos - uy_yneg) / L / delta_T,
+            (uz_zpos - uz_zneg) / L / delta_T
         ])
 
         return eps_th
 
     def compute_stiffness_matrix(self, strain_mag=0.001):
         """
-        Compute the complete 6x6 stiffness matrix.
+        Compute the complete 6x6 stiffness matrix using KUBC.
 
         Parameters
         ----------
@@ -588,41 +741,40 @@ class AdvancedCompositeCalculator:
             6x6 stiffness matrix in Voigt notation
         """
         print(f"\n{'='*60}")
-        print("COMPUTING STIFFNESS MATRIX")
+        print("COMPUTING STIFFNESS MATRIX (KUBC)")
         print(f"{'='*60}")
         print(f"Result files will be saved in: {self.mapdl.directory}")
 
         C = np.zeros((6, 6))
 
-        # Define 6 load cases (unit strains in each direction)
-        # Voigt notation: [ε11, ε22, ε33, γ12, γ23, γ31]
+        # Define 6 load cases with corresponding BC functions
+        # Format: (direction_name, jobname, bc_function)
         load_cases = [
-            [1, 0, 0, 0, 0, 0],  # ε11
-            [0, 1, 0, 0, 0, 0],  # ε22
-            [0, 0, 1, 0, 0, 0],  # ε33
-            [0, 0, 0, 1, 0, 0],  # γ12 (engineering shear)
-            [0, 0, 0, 0, 1, 0],  # γ23
-            [0, 0, 0, 0, 0, 1],  # γ31
+            ('ε11 (Ex)', 'LC1_e11', self.apply_bc_uniaxial_x),
+            ('ε22 (Ey)', 'LC2_e22', self.apply_bc_uniaxial_y),
+            ('ε33 (Ez)', 'LC3_e33', self.apply_bc_uniaxial_z),
+            ('γ12 (Gxy)', 'LC4_g12', self.apply_bc_shear_xy),
+            ('γ23 (Gyz)', 'LC5_g23', self.apply_bc_shear_yz),
+            ('γ31 (Gzx)', 'LC6_g31', self.apply_bc_shear_zx),
         ]
 
-        directions = ['ε11', 'ε22', 'ε33', 'γ12', 'γ23', 'γ31']
-        jobnames = ['LC1_e11', 'LC2_e22', 'LC3_e33', 'LC4_g12', 'LC5_g23', 'LC6_g31']
-
-        for i, lc in enumerate(load_cases):
-            print(f"  Load case {i+1}/6: {directions[i]}...")
+        for i, (direction, jobname, bc_func) in enumerate(load_cases):
+            print(f"  Load case {i+1}/6: {direction}...")
 
             self.mapdl.prep7()
-            eps_applied = np.array(lc) * strain_mag
-            self.apply_periodic_bc(eps_applied)
+            bc_func(strain_mag)
 
             # Save DB before solving each load case
-            self.mapdl.save(f'step4_{jobnames[i]}_bc')
-            print(f"    Saved: step4_{jobnames[i]}_bc.db")
+            self.mapdl.save(f'step4_{jobname}_bc')
+            print(f"    Saved: step4_{jobname}_bc.db")
 
-            self.solve(jobname=jobnames[i])
+            self.solve(jobname=jobname)
 
             stress = self.get_volume_avg_stress()
             C[:, i] = stress / strain_mag
+
+            print(f"    Stress: σ11={stress[0]:.2f}, σ22={stress[1]:.2f}, σ33={stress[2]:.2f}")
+            print(f"            τ12={stress[3]:.2f}, τ23={stress[4]:.2f}, τ31={stress[5]:.2f}")
 
         # Symmetrize the matrix (should be symmetric for linear elastic)
         C = 0.5 * (C + C.T)

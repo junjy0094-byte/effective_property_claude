@@ -186,9 +186,9 @@ class AdvancedCompositeCalculator:
 
         for v in range(1, n_vol + 1):
             m.vsel('S', 'VOLU', '', v)
-            # Get centroid
-            cx = m.get('CENTX', 'VOLU', v, 'CENT', 'X')
-            cy = m.get('CENTY', 'VOLU', v, 'CENT', 'Y')
+            # Get centroid (convert to float as m.get may return string)
+            cx = float(m.get('CENTX', 'VOLU', v, 'CENT', 'X'))
+            cy = float(m.get('CENTY', 'VOLU', v, 'CENT', 'Y'))
 
             # Check if centroid is in fiber region
             if x1 < cx < x2 and y1 < cy < y2:

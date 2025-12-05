@@ -147,10 +147,6 @@ class AdvancedCompositeCalculator:
         # Element type: SOLID185 (8-node hex)
         m.et(1, 'SOLID185')
 
-        # Save DB after material definition
-        m.save('step1_materials.db')
-        print("  Saved: step1_materials.db")
-
         # Create geometry using keypoints and volumes for mapped meshing
         # The RVE is divided into 9 volumes (3x3 in XY plane, extruded in Z)
         # Center volume is fiber, surrounding 8 volumes are matrix
@@ -190,10 +186,6 @@ class AdvancedCompositeCalculator:
 
         m.allsel()
 
-        # Save DB after geometry and mesh
-        m.save('step2_geometry_mesh.db')
-        print("  Saved: step2_geometry_mesh.db")
-
         # Merge nodes at interfaces
         m.nummrg('NODE', 1e-6)
 
@@ -201,12 +193,8 @@ class AdvancedCompositeCalculator:
         ne = int(m.get('ECOUNT', 'ELEM', '', 'COUNT'))
         print(f"Mesh: {nn} nodes, {ne} elements")
 
-        # Create face node sets for KUBC
+        # Create face node sets for periodic BC
         self._create_face_sets()
-
-        # Save DB after face sets
-        m.save('step3_face_sets.db')
-        print("  Saved: step3_face_sets.db")
 
         print("Model built successfully")
 
@@ -260,65 +248,59 @@ class AdvancedCompositeCalculator:
 
         For each direction, pairs nodes on the negative face with corresponding
         nodes on the positive face that have the same coordinates in the other
-        two directions.
+        two directions. Optimized O(n) algorithm using dictionary lookup.
         """
         m = self.mapdl
-        tol = 1e-6
+        decimals = 6  # Precision for coordinate rounding
 
         m.allsel()
         all_nodes = m.mesh.nodes  # shape (n_nodes, 3): [x, y, z]
         all_nnum = m.mesh.nnum    # node numbers
 
-        # Create coordinate-to-node mapping for each face
+        # Create node number to index mapping for fast lookup
+        nnum_to_idx = {n: i for i, n in enumerate(all_nnum)}
+
         self.node_pairs = {'X': [], 'Y': [], 'Z': []}
 
-        # X-direction pairs: XNEG (x=0) <-> XPOS (x=L)
-        # Match by (y, z) coordinates
-        xneg_nodes = self.face_nodes['XNEG']
-        xpos_nodes = self.face_nodes['XPOS']
-        for n_neg in xneg_nodes:
-            idx_neg = np.where(all_nnum == n_neg)[0][0]
-            y_neg, z_neg = all_nodes[idx_neg, 1], all_nodes[idx_neg, 2]
+        # X-direction pairs: Match by (y, z) coordinates
+        # Build dictionary from XPOS nodes: (y,z) -> node_num
+        xpos_dict = {}
+        for n_pos in self.face_nodes['XPOS']:
+            idx = nnum_to_idx[n_pos]
+            key = (round(all_nodes[idx, 1], decimals), round(all_nodes[idx, 2], decimals))
+            xpos_dict[key] = int(n_pos)
 
-            for n_pos in xpos_nodes:
-                idx_pos = np.where(all_nnum == n_pos)[0][0]
-                y_pos, z_pos = all_nodes[idx_pos, 1], all_nodes[idx_pos, 2]
+        for n_neg in self.face_nodes['XNEG']:
+            idx = nnum_to_idx[n_neg]
+            key = (round(all_nodes[idx, 1], decimals), round(all_nodes[idx, 2], decimals))
+            if key in xpos_dict:
+                self.node_pairs['X'].append((int(n_neg), xpos_dict[key]))
 
-                if abs(y_neg - y_pos) < tol and abs(z_neg - z_pos) < tol:
-                    self.node_pairs['X'].append((int(n_neg), int(n_pos)))
-                    break
+        # Y-direction pairs: Match by (x, z) coordinates
+        ypos_dict = {}
+        for n_pos in self.face_nodes['YPOS']:
+            idx = nnum_to_idx[n_pos]
+            key = (round(all_nodes[idx, 0], decimals), round(all_nodes[idx, 2], decimals))
+            ypos_dict[key] = int(n_pos)
 
-        # Y-direction pairs: YNEG (y=0) <-> YPOS (y=L)
-        # Match by (x, z) coordinates
-        yneg_nodes = self.face_nodes['YNEG']
-        ypos_nodes = self.face_nodes['YPOS']
-        for n_neg in yneg_nodes:
-            idx_neg = np.where(all_nnum == n_neg)[0][0]
-            x_neg, z_neg = all_nodes[idx_neg, 0], all_nodes[idx_neg, 2]
+        for n_neg in self.face_nodes['YNEG']:
+            idx = nnum_to_idx[n_neg]
+            key = (round(all_nodes[idx, 0], decimals), round(all_nodes[idx, 2], decimals))
+            if key in ypos_dict:
+                self.node_pairs['Y'].append((int(n_neg), ypos_dict[key]))
 
-            for n_pos in ypos_nodes:
-                idx_pos = np.where(all_nnum == n_pos)[0][0]
-                x_pos, z_pos = all_nodes[idx_pos, 0], all_nodes[idx_pos, 2]
+        # Z-direction pairs: Match by (x, y) coordinates
+        zpos_dict = {}
+        for n_pos in self.face_nodes['ZPOS']:
+            idx = nnum_to_idx[n_pos]
+            key = (round(all_nodes[idx, 0], decimals), round(all_nodes[idx, 1], decimals))
+            zpos_dict[key] = int(n_pos)
 
-                if abs(x_neg - x_pos) < tol and abs(z_neg - z_pos) < tol:
-                    self.node_pairs['Y'].append((int(n_neg), int(n_pos)))
-                    break
-
-        # Z-direction pairs: ZNEG (z=0) <-> ZPOS (z=L)
-        # Match by (x, y) coordinates
-        zneg_nodes = self.face_nodes['ZNEG']
-        zpos_nodes = self.face_nodes['ZPOS']
-        for n_neg in zneg_nodes:
-            idx_neg = np.where(all_nnum == n_neg)[0][0]
-            x_neg, y_neg = all_nodes[idx_neg, 0], all_nodes[idx_neg, 1]
-
-            for n_pos in zpos_nodes:
-                idx_pos = np.where(all_nnum == n_pos)[0][0]
-                x_pos, y_pos = all_nodes[idx_pos, 0], all_nodes[idx_pos, 1]
-
-                if abs(x_neg - x_pos) < tol and abs(y_neg - y_pos) < tol:
-                    self.node_pairs['Z'].append((int(n_neg), int(n_pos)))
-                    break
+        for n_neg in self.face_nodes['ZNEG']:
+            idx = nnum_to_idx[n_neg]
+            key = (round(all_nodes[idx, 0], decimals), round(all_nodes[idx, 1], decimals))
+            if key in zpos_dict:
+                self.node_pairs['Z'].append((int(n_neg), zpos_dict[key]))
 
     def _find_rigid_body_nodes(self):
         """
@@ -661,11 +643,6 @@ class AdvancedCompositeCalculator:
 
             self.mapdl.prep7()
             bc_func(strain_mag)
-
-            # Save DB before solving each load case
-            self.mapdl.save(f'step4_{jobname}_bc.db')
-            print(f"    Saved: step4_{jobname}_bc.db")
-
             self.solve(jobname=jobname)
 
             # Get volume-averaged stress (Equation 3.17)
@@ -804,11 +781,6 @@ class AdvancedCompositeCalculator:
         # Apply LC7: Thermal load with vanishing macroscopic strain
         self.mapdl.prep7()
         self.apply_bc_load_case_7_thermal(delta_T)
-
-        # Save DB before solving
-        self.mapdl.save('step4_LC7_thermal_bc.db')
-        print(f"    Saved: step4_LC7_thermal_bc.db")
-
         self.solve(jobname='LC7_thermal')
 
         # Get volume-averaged stress from thermal load case

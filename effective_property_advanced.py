@@ -26,6 +26,8 @@ Reference:
 - Hill, R. (1963). "Elastic properties of reinforced solids"
 """
 
+import os
+import glob
 import numpy as np
 from ansys.mapdl.core import launch_mapdl
 
@@ -135,7 +137,7 @@ class AdvancedCompositeCalculator:
         m.et(1, 'SOLID185')
 
         # Save DB after material definition
-        m.save('step1_materials')
+        m.save('step1_materials.db')
         print("  Saved: step1_materials.db")
 
         # Create geometry using keypoints and volumes for mapped meshing
@@ -178,7 +180,7 @@ class AdvancedCompositeCalculator:
         m.allsel()
 
         # Save DB after geometry and mesh
-        m.save('step2_geometry_mesh')
+        m.save('step2_geometry_mesh.db')
         print("  Saved: step2_geometry_mesh.db")
 
         # Merge nodes at interfaces
@@ -192,7 +194,7 @@ class AdvancedCompositeCalculator:
         self._create_face_sets()
 
         # Save DB after face sets
-        m.save('step3_face_sets')
+        m.save('step3_face_sets.db')
         print("  Saved: step3_face_sets.db")
 
         print("Model built successfully")
@@ -450,9 +452,9 @@ class AdvancedCompositeCalculator:
         Apply KUBC boundary conditions for shear strain in XY plane (for Gxy).
 
         Boundary conditions:
-        - Y=0 face: Ux=0, Uy=0 (fixed in transverse direction)
+        - Y=0 face: Ux=0, Uy=0 (fixed)
         - Y=L face: Ux=γ*L (shear displacement)
-        - All XZ-planes (every Y coordinate): nodes have same UY (planes remain flat)
+        - All XZ-planes (every Y coordinate): nodes have same UX AND UY (inclined planes remain flat)
         - All XY-planes (every Z coordinate): nodes have same UZ (planes remain flat)
         - Rigid body constraints
         """
@@ -474,6 +476,9 @@ class AdvancedCompositeCalculator:
         m.d('ALL', 'UX', strain_val * L)
         m.allsel()
 
+        # Couple all Y-planes: All nodes at same Y have same UX (inclined plane remains flat)
+        cp_num = self._couple_all_planes('Y', 'UX', cp_num)
+
         # Couple all Y-planes: All nodes at same Y have same UY (plane remains flat)
         cp_num = self._couple_all_planes('Y', 'UY', cp_num)
 
@@ -491,9 +496,9 @@ class AdvancedCompositeCalculator:
         Apply KUBC boundary conditions for shear strain in YZ plane (for Gyz).
 
         Boundary conditions:
-        - Z=0 face: Uy=0, Uz=0 (fixed in transverse direction)
+        - Z=0 face: Uy=0, Uz=0 (fixed)
         - Z=L face: Uy=γ*L (shear displacement)
-        - All XY-planes (every Z coordinate): nodes have same UZ (planes remain flat)
+        - All XY-planes (every Z coordinate): nodes have same UY AND UZ (inclined planes remain flat)
         - All YZ-planes (every X coordinate): nodes have same UX (planes remain flat)
         - Rigid body constraints
         """
@@ -515,6 +520,9 @@ class AdvancedCompositeCalculator:
         m.d('ALL', 'UY', strain_val * L)
         m.allsel()
 
+        # Couple all Z-planes: All nodes at same Z have same UY (inclined plane remains flat)
+        cp_num = self._couple_all_planes('Z', 'UY', cp_num)
+
         # Couple all Z-planes: All nodes at same Z have same UZ (plane remains flat)
         cp_num = self._couple_all_planes('Z', 'UZ', cp_num)
 
@@ -532,9 +540,9 @@ class AdvancedCompositeCalculator:
         Apply KUBC boundary conditions for shear strain in ZX plane (for Gzx).
 
         Boundary conditions:
-        - X=0 face: Uz=0, Ux=0 (fixed in transverse direction)
+        - X=0 face: Uz=0, Ux=0 (fixed)
         - X=L face: Uz=γ*L (shear displacement)
-        - All YZ-planes (every X coordinate): nodes have same UX (planes remain flat)
+        - All YZ-planes (every X coordinate): nodes have same UX AND UZ (inclined planes remain flat)
         - All XZ-planes (every Y coordinate): nodes have same UY (planes remain flat)
         - Rigid body constraints
         """
@@ -555,6 +563,9 @@ class AdvancedCompositeCalculator:
         m.cmsel('S', 'XPOS')
         m.d('ALL', 'UZ', strain_val * L)
         m.allsel()
+
+        # Couple all X-planes: All nodes at same X have same UZ (inclined plane remains flat)
+        cp_num = self._couple_all_planes('X', 'UZ', cp_num)
 
         # Couple all X-planes: All nodes at same X have same UX (plane remains flat)
         cp_num = self._couple_all_planes('X', 'UX', cp_num)
@@ -624,6 +635,26 @@ class AdvancedCompositeCalculator:
 
         if jobname:
             print(f"    Result saved: {jobname}.rst")
+
+        # Clean up temporary files (DSP, esav, full, mntr)
+        self._cleanup_temp_files()
+
+    def _cleanup_temp_files(self):
+        """Remove temporary MAPDL files to save disk space."""
+        if not self.mapdl:
+            return
+
+        work_dir = self.mapdl.directory
+        temp_extensions = ['*.DSP', '*.esav', '*.full', '*.mntr',
+                          '*.dsp', '*.ESAV', '*.FULL', '*.MNTR']
+
+        for ext in temp_extensions:
+            pattern = os.path.join(work_dir, ext)
+            for filepath in glob.glob(pattern):
+                try:
+                    os.remove(filepath)
+                except OSError:
+                    pass  # Ignore errors if file is in use or already deleted
 
     def get_volume_avg_stress(self):
         """
@@ -766,7 +797,7 @@ class AdvancedCompositeCalculator:
             bc_func(strain_mag)
 
             # Save DB before solving each load case
-            self.mapdl.save(f'step4_{jobname}_bc')
+            self.mapdl.save(f'step4_{jobname}_bc.db')
             print(f"    Saved: step4_{jobname}_bc.db")
 
             self.solve(jobname=jobname)

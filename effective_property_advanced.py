@@ -1,29 +1,35 @@
 """
 Advanced Composite Material Effective Property Calculator using PyANSYS
 
-This version implements Kinematic Uniform Boundary Conditions (KUBC) for RVE homogenization.
-KUBC ensures that each face remains planar while allowing free lateral contraction/expansion,
-which correctly models the behavior of a homogenized material.
+This version implements Periodic Boundary Conditions (PBC) for RVE homogenization
+based on ANSYS 2025 R1 Theory Documentation (Section 3.2.2.1).
 
 Key features:
 1. Square prism fiber geometry (for compatible hex meshing)
 2. SOLID185 hex elements with matching meshes on opposite faces
-3. KUBC boundary conditions using Coupled DOF (CP command)
-4. Volume-averaged stress and strain for effective property computation
+3. Periodic boundary conditions using Constraint Equations (CE command)
+4. Stiffness matrix computation from 6 mechanical load cases
+5. Thermal expansion coefficients from thermal load case
 
-KUBC formulation for Ex calculation:
-    - X=0 face: Ux=0 (fixed in loading direction)
-    - X=L face: Ux=ε*L (displacement load)
-    - Y=0, Y=L faces: All nodes have same Uy (coupled DOF - plane remains flat)
-    - Z=0, Z=L faces: All nodes have same Uz (coupled DOF - plane remains flat)
-    - Minimal rigid body constraints (one node fixed in Uy, Uz)
+Periodic Boundary Conditions (Equations 3.24-3.26):
+    On X-faces: u_x(L_x,y,z) = u_x(0,y,z) + ε_x*L_x
+                u_y(L_x,y,z) = u_y(0,y,z) + γ_xy*L_x
+                u_z(L_x,y,z) = u_z(0,y,z) + γ_xz*L_x
+    On Y-faces: u_x(x,L_y,z) = u_x(x,0,z)
+                u_y(x,L_y,z) = u_y(x,0,z) + ε_y*L_y
+                u_z(x,L_y,z) = u_z(x,0,z) + γ_yz*L_y
+    On Z-faces: u_x(x,y,L_z) = u_x(x,y,0)
+                u_y(x,y,L_z) = u_y(x,y,0)
+                u_z(x,y,L_z) = u_z(x,y,0) + ε_z*L_z
 
-This approach allows proper Poisson contraction while maintaining plane faces,
-matching the behavior of a homogenized material under uniaxial loading.
+Rigid body constraints (Equation 3.27):
+    u_x(point with x=0) = 0
+    u_y(point with y=0) = 0
+    u_z(point with z=0) = 0
 
 Reference:
-- Suquet, P. (1987). "Elements of homogenization for inelastic solid mechanics"
-- Hill, R. (1963). "Elastic properties of reinforced solids"
+- ANSYS 2025 R1 Theory Documentation, Section 3.2.2.1
+- Li et al. (2008), Li et al. (2015) for periodic boundary conditions
 """
 
 import os
@@ -34,10 +40,11 @@ from ansys.mapdl.core import launch_mapdl
 
 class AdvancedCompositeCalculator:
     """
-    Advanced calculator for effective material properties using KUBC.
+    Advanced calculator for effective material properties using Periodic BC.
 
-    Uses Kinematic Uniform Boundary Conditions (KUBC) with Coupled DOF
-    to ensure plane faces while allowing free lateral contraction.
+    Uses Periodic Boundary Conditions (PBC) with Constraint Equations (CE)
+    to enforce periodicity on opposite faces of the RVE.
+    Based on ANSYS 2025 R1 Theory Documentation.
     """
 
     def __init__(self, rve_size=1.0, fiber_vf=0.10):
@@ -47,11 +54,14 @@ class AdvancedCompositeCalculator:
         Parameters
         ----------
         rve_size : float
-            Size of the RVE cube in mm
+            Size of the RVE cube in mm (L_x = L_y = L_z = L)
         fiber_vf : float
             Fiber volume fraction (0 to 1)
         """
         self.L = rve_size
+        self.Lx = rve_size
+        self.Ly = rve_size
+        self.Lz = rve_size
         self.Vf = fiber_vf
         self.V = rve_size ** 3
 
@@ -67,7 +77,8 @@ class AdvancedCompositeCalculator:
 
         self.mapdl = None
         self.face_nodes = {}    # Node lists for each face
-        self.corner_node = None # Corner node at origin for rigid body constraints
+        self.node_pairs = {}    # Node pairs for periodic BC (X, Y, Z directions)
+        self.rigid_body_nodes = {}  # Nodes for rigid body constraints
         self.stiffness_matrix = None
         self.compliance_matrix = None
         self.effective_props = {}
@@ -200,12 +211,12 @@ class AdvancedCompositeCalculator:
         print("Model built successfully")
 
     def _create_face_sets(self):
-        """Create node sets for each face and identify corner node."""
+        """Create node sets for each face and create node pairs for periodic BC."""
         m = self.mapdl
         L = self.L
         tol = 1e-6
 
-        print("  Creating face node sets for KUBC...")
+        print("  Creating face node sets for Periodic BC...")
 
         # Create face component sets and store node lists
         faces = [
@@ -226,17 +237,12 @@ class AdvancedCompositeCalculator:
 
         m.allsel()
 
-        # Find corner node at origin (0, 0, 0) for rigid body constraints
-        m.nsel('S', 'LOC', 'X', 0, tol)
-        m.nsel('R', 'LOC', 'Y', 0, tol)
-        m.nsel('R', 'LOC', 'Z', 0, tol)
-        corner_nodes = m.mesh.nnum
-        if len(corner_nodes) > 0:
-            self.corner_node = int(corner_nodes[0])
-        else:
-            # Fallback: find any node on XNEG face
-            self.corner_node = int(self.face_nodes['XNEG'][0])
-        m.allsel()
+        # Create node pairs for periodic boundary conditions
+        self._create_node_pairs()
+
+        # Find nodes for rigid body constraints (Equation 3.27)
+        # u_x(point with x=0) = 0, u_y(point with y=0) = 0, u_z(point with z=0) = 0
+        self._find_rigid_body_nodes()
 
         print(f"    XNEG: {len(self.face_nodes['XNEG'])} nodes")
         print(f"    XPOS: {len(self.face_nodes['XPOS'])} nodes")
@@ -244,380 +250,282 @@ class AdvancedCompositeCalculator:
         print(f"    YPOS: {len(self.face_nodes['YPOS'])} nodes")
         print(f"    ZNEG: {len(self.face_nodes['ZNEG'])} nodes")
         print(f"    ZPOS: {len(self.face_nodes['ZPOS'])} nodes")
-        print(f"    Corner node (origin): {self.corner_node}")
+        print(f"    X-direction node pairs: {len(self.node_pairs['X'])}")
+        print(f"    Y-direction node pairs: {len(self.node_pairs['Y'])}")
+        print(f"    Z-direction node pairs: {len(self.node_pairs['Z'])}")
+
+    def _create_node_pairs(self):
+        """
+        Create node pairs between opposite faces for periodic BC.
+
+        For each direction, pairs nodes on the negative face with corresponding
+        nodes on the positive face that have the same coordinates in the other
+        two directions.
+        """
+        m = self.mapdl
+        tol = 1e-6
+
+        m.allsel()
+        all_nodes = m.mesh.nodes  # shape (n_nodes, 3): [x, y, z]
+        all_nnum = m.mesh.nnum    # node numbers
+
+        # Create coordinate-to-node mapping for each face
+        self.node_pairs = {'X': [], 'Y': [], 'Z': []}
+
+        # X-direction pairs: XNEG (x=0) <-> XPOS (x=L)
+        # Match by (y, z) coordinates
+        xneg_nodes = self.face_nodes['XNEG']
+        xpos_nodes = self.face_nodes['XPOS']
+        for n_neg in xneg_nodes:
+            idx_neg = np.where(all_nnum == n_neg)[0][0]
+            y_neg, z_neg = all_nodes[idx_neg, 1], all_nodes[idx_neg, 2]
+
+            for n_pos in xpos_nodes:
+                idx_pos = np.where(all_nnum == n_pos)[0][0]
+                y_pos, z_pos = all_nodes[idx_pos, 1], all_nodes[idx_pos, 2]
+
+                if abs(y_neg - y_pos) < tol and abs(z_neg - z_pos) < tol:
+                    self.node_pairs['X'].append((int(n_neg), int(n_pos)))
+                    break
+
+        # Y-direction pairs: YNEG (y=0) <-> YPOS (y=L)
+        # Match by (x, z) coordinates
+        yneg_nodes = self.face_nodes['YNEG']
+        ypos_nodes = self.face_nodes['YPOS']
+        for n_neg in yneg_nodes:
+            idx_neg = np.where(all_nnum == n_neg)[0][0]
+            x_neg, z_neg = all_nodes[idx_neg, 0], all_nodes[idx_neg, 2]
+
+            for n_pos in ypos_nodes:
+                idx_pos = np.where(all_nnum == n_pos)[0][0]
+                x_pos, z_pos = all_nodes[idx_pos, 0], all_nodes[idx_pos, 2]
+
+                if abs(x_neg - x_pos) < tol and abs(z_neg - z_pos) < tol:
+                    self.node_pairs['Y'].append((int(n_neg), int(n_pos)))
+                    break
+
+        # Z-direction pairs: ZNEG (z=0) <-> ZPOS (z=L)
+        # Match by (x, y) coordinates
+        zneg_nodes = self.face_nodes['ZNEG']
+        zpos_nodes = self.face_nodes['ZPOS']
+        for n_neg in zneg_nodes:
+            idx_neg = np.where(all_nnum == n_neg)[0][0]
+            x_neg, y_neg = all_nodes[idx_neg, 0], all_nodes[idx_neg, 1]
+
+            for n_pos in zpos_nodes:
+                idx_pos = np.where(all_nnum == n_pos)[0][0]
+                x_pos, y_pos = all_nodes[idx_pos, 0], all_nodes[idx_pos, 1]
+
+                if abs(x_neg - x_pos) < tol and abs(y_neg - y_pos) < tol:
+                    self.node_pairs['Z'].append((int(n_neg), int(n_pos)))
+                    break
+
+    def _find_rigid_body_nodes(self):
+        """
+        Find nodes for rigid body constraints (Equation 3.27).
+
+        u_x(point with x=0) = 0  -> fix UX at one node on x=0 plane
+        u_y(point with y=0) = 0  -> fix UY at one node on y=0 plane
+        u_z(point with z=0) = 0  -> fix UZ at one node on z=0 plane
+        """
+        m = self.mapdl
+        tol = 1e-6
+
+        # Node on x=0 plane for UX=0 constraint
+        m.nsel('S', 'LOC', 'X', 0, tol)
+        nodes_x0 = m.mesh.nnum
+        self.rigid_body_nodes['UX'] = int(nodes_x0[0]) if len(nodes_x0) > 0 else None
+
+        # Node on y=0 plane for UY=0 constraint
+        m.nsel('S', 'LOC', 'Y', 0, tol)
+        nodes_y0 = m.mesh.nnum
+        self.rigid_body_nodes['UY'] = int(nodes_y0[0]) if len(nodes_y0) > 0 else None
+
+        # Node on z=0 plane for UZ=0 constraint
+        m.nsel('S', 'LOC', 'Z', 0, tol)
+        nodes_z0 = m.mesh.nnum
+        self.rigid_body_nodes['UZ'] = int(nodes_z0[0]) if len(nodes_z0) > 0 else None
+
+        m.allsel()
+
+        print(f"    Rigid body nodes: UX@{self.rigid_body_nodes['UX']}, "
+              f"UY@{self.rigid_body_nodes['UY']}, UZ@{self.rigid_body_nodes['UZ']}")
 
     def _clear_all_constraints(self):
-        """Clear all displacement constraints and coupled DOFs."""
+        """Clear all displacement constraints, coupled DOFs, and constraint equations."""
         m = self.mapdl
         m.ddele('ALL', 'ALL')
         m.run('CPDELE,ALL')
         m.run('CEDELE,ALL')
 
-    def _couple_face_dof(self, face_name, dof, cp_set_num):
+    def _apply_periodic_bc(self, eps_x=0.0, eps_y=0.0, eps_z=0.0,
+                           gamma_xy=0.0, gamma_yz=0.0, gamma_xz=0.0):
         """
-        Couple all nodes on a face to have the same displacement in specified DOF.
+        Apply Periodic Boundary Conditions using Constraint Equations.
+
+        Based on ANSYS 2025 R1 Theory Documentation (Equations 3.24-3.27).
+
+        On X-faces (Equation 3.24):
+            u_x(L_x,y,z) = u_x(0,y,z) + ε_x * L_x
+            u_y(L_x,y,z) = u_y(0,y,z) + γ_xy * L_x
+            u_z(L_x,y,z) = u_z(0,y,z) + γ_xz * L_x
+
+        On Y-faces (Equation 3.25):
+            u_x(x,L_y,z) = u_x(x,0,z)
+            u_y(x,L_y,z) = u_y(x,0,z) + ε_y * L_y
+            u_z(x,L_y,z) = u_z(x,0,z) + γ_yz * L_y
+
+        On Z-faces (Equation 3.26):
+            u_x(x,y,L_z) = u_x(x,y,0)
+            u_y(x,y,L_z) = u_y(x,y,0)
+            u_z(x,y,L_z) = u_z(x,y,0) + ε_z * L_z
 
         Parameters
         ----------
-        face_name : str
-            Name of face component (XNEG, XPOS, YNEG, YPOS, ZNEG, ZPOS)
-        dof : str
-            Degree of freedom to couple (UX, UY, or UZ)
-        cp_set_num : int
-            Coupled set number for ANSYS CP command
+        eps_x, eps_y, eps_z : float
+            Normal strain components
+        gamma_xy, gamma_yz, gamma_xz : float
+            Shear strain components
         """
         m = self.mapdl
-        m.cmsel('S', face_name)
-        m.cp(cp_set_num, dof, 'ALL')
-        m.allsel()
-
-    def _couple_all_planes(self, direction, dof, start_cp_num):
-        """
-        Couple all nodes at each unique coordinate value in the specified direction.
-
-        This ensures that all parallel planes remain flat like in a homogeneous material.
-        For example, if direction='X' and dof='UX', all nodes with the same X coordinate
-        will have the same UX displacement, keeping each YZ-plane flat.
-
-        Parameters
-        ----------
-        direction : str
-            Coordinate direction ('X', 'Y', or 'Z')
-        dof : str
-            Degree of freedom to couple (UX, UY, or UZ)
-        start_cp_num : int
-            Starting coupled set number
-
-        Returns
-        -------
-        int
-            Next available coupled set number
-        """
-        m = self.mapdl
-        L = self.L
-        tol = 1e-6
-
-        # Get all nodes and their coordinates
-        m.nsel('ALL')
-        all_nodes = m.mesh.nodes  # shape (n_nodes, 3)
-        node_nums = m.mesh.nnum
-
-        # Get coordinate index
-        coord_idx = {'X': 0, 'Y': 1, 'Z': 2}[direction]
-        coords = all_nodes[:, coord_idx]
-
-        # Find unique coordinate values (rounded to avoid floating point issues)
-        unique_coords = np.unique(np.round(coords, 6))
-
-        cp_num = start_cp_num
-        for coord in unique_coords:
-            # Select all nodes at this coordinate
-            m.nsel('S', 'LOC', direction, coord - tol, coord + tol)
-            n_selected = int(m.get('NCOUNT', 'NODE', '', 'COUNT'))
-
-            # Only couple if more than one node
-            if n_selected > 1:
-                m.cp(cp_num, dof, 'ALL')
-                cp_num += 1
-
-            m.allsel()
-
-        return cp_num
-
-    def apply_bc_uniaxial_x(self, strain_val=0.001):
-        """
-        Apply KUBC boundary conditions for uniaxial strain in X direction (for Ex).
-
-        Boundary conditions:
-        - X=0 face: Ux=0 (fixed in loading direction)
-        - X=L face: Ux=ε*L (displacement load)
-        - All YZ-planes (every Y coordinate): nodes have same UY (planes remain flat)
-        - All XY-planes (every Z coordinate): nodes have same UZ (planes remain flat)
-        - Rigid body constraint: Corner node Uy=Uz=0
-        """
-        m = self.mapdl
-        L = self.L
+        Lx, Ly, Lz = self.Lx, self.Ly, self.Lz
 
         self._clear_all_constraints()
 
-        cp_num = 1  # Coupled DOF set counter
+        ce_num = 1  # Constraint equation counter
 
-        # X=0 face: Fixed in X direction
-        m.cmsel('S', 'XNEG')
-        m.d('ALL', 'UX', 0)
+        # X-direction periodic BC (Equation 3.24)
+        # u_pos - u_neg = offset
+        # CE format: CE,NEQN,CONST, NODE1,Lab1,C1, NODE2,Lab2,C2, ...
+        # CONST + C1*NODE1.Lab1 + C2*NODE2.Lab2 = 0
+        # For u_pos - u_neg = offset:  -offset + 1*u_pos + (-1)*u_neg = 0
+        for (n_neg, n_pos) in self.node_pairs['X']:
+            # UX: u_x(L_x) - u_x(0) = eps_x * L_x
+            m.ce(ce_num, -eps_x * Lx, n_pos, 'UX', 1, n_neg, 'UX', -1)
+            ce_num += 1
+
+            # UY: u_y(L_x) - u_y(0) = gamma_xy * L_x
+            m.ce(ce_num, -gamma_xy * Lx, n_pos, 'UY', 1, n_neg, 'UY', -1)
+            ce_num += 1
+
+            # UZ: u_z(L_x) - u_z(0) = gamma_xz * L_x
+            m.ce(ce_num, -gamma_xz * Lx, n_pos, 'UZ', 1, n_neg, 'UZ', -1)
+            ce_num += 1
+
+        # Y-direction periodic BC (Equation 3.25)
+        for (n_neg, n_pos) in self.node_pairs['Y']:
+            # UX: u_x(L_y) - u_x(0) = 0
+            m.ce(ce_num, 0, n_pos, 'UX', 1, n_neg, 'UX', -1)
+            ce_num += 1
+
+            # UY: u_y(L_y) - u_y(0) = eps_y * L_y
+            m.ce(ce_num, -eps_y * Ly, n_pos, 'UY', 1, n_neg, 'UY', -1)
+            ce_num += 1
+
+            # UZ: u_z(L_y) - u_z(0) = gamma_yz * L_y
+            m.ce(ce_num, -gamma_yz * Ly, n_pos, 'UZ', 1, n_neg, 'UZ', -1)
+            ce_num += 1
+
+        # Z-direction periodic BC (Equation 3.26)
+        for (n_neg, n_pos) in self.node_pairs['Z']:
+            # UX: u_x(L_z) - u_x(0) = 0
+            m.ce(ce_num, 0, n_pos, 'UX', 1, n_neg, 'UX', -1)
+            ce_num += 1
+
+            # UY: u_y(L_z) - u_y(0) = 0
+            m.ce(ce_num, 0, n_pos, 'UY', 1, n_neg, 'UY', -1)
+            ce_num += 1
+
+            # UZ: u_z(L_z) - u_z(0) = eps_z * L_z
+            m.ce(ce_num, -eps_z * Lz, n_pos, 'UZ', 1, n_neg, 'UZ', -1)
+            ce_num += 1
+
+        # Rigid body constraints (Equation 3.27)
+        # u_x(point with x=0) = 0
+        # u_y(point with y=0) = 0
+        # u_z(point with z=0) = 0
+        if self.rigid_body_nodes['UX'] is not None:
+            m.d(self.rigid_body_nodes['UX'], 'UX', 0)
+        if self.rigid_body_nodes['UY'] is not None:
+            m.d(self.rigid_body_nodes['UY'], 'UY', 0)
+        if self.rigid_body_nodes['UZ'] is not None:
+            m.d(self.rigid_body_nodes['UZ'], 'UZ', 0)
+
         m.allsel()
 
-        # X=L face: Applied displacement
-        m.cmsel('S', 'XPOS')
-        m.d('ALL', 'UX', strain_val * L)
-        m.allsel()
-
-        # Couple all Y-planes: All nodes at same Y have same UY (plane remains flat)
-        cp_num = self._couple_all_planes('Y', 'UY', cp_num)
-
-        # Couple all Z-planes: All nodes at same Z have same UZ (plane remains flat)
-        cp_num = self._couple_all_planes('Z', 'UZ', cp_num)
-
-        # Rigid body constraints - fix corner node in Y and Z only
-        m.d(self.corner_node, 'UY', 0)
-        m.d(self.corner_node, 'UZ', 0)
-
-        m.allsel()
-        print(f"    Applied KUBC for Ex (ε11={strain_val})")
-
-    def apply_bc_uniaxial_y(self, strain_val=0.001):
+    def apply_bc_load_case_1(self, strain_val=0.001):
         """
-        Apply KUBC boundary conditions for uniaxial strain in Y direction (for Ey).
+        Apply Periodic BC for Load Case 1: Tensile test in X direction.
 
-        Boundary conditions:
-        - Y=0 face: Uy=0 (fixed in loading direction)
-        - Y=L face: Uy=ε*L (displacement load)
-        - All YZ-planes (every X coordinate): nodes have same UX (planes remain flat)
-        - All XY-planes (every Z coordinate): nodes have same UZ (planes remain flat)
-        - Rigid body constraint: Corner node Ux=Uz=0
+        ε_x = strain_val, all other strain components = 0
         """
-        m = self.mapdl
-        L = self.L
+        self._apply_periodic_bc(eps_x=strain_val)
+        print(f"    Applied Periodic BC for LC1: ε_x = {strain_val}")
 
-        self._clear_all_constraints()
-
-        cp_num = 1
-
-        # Y=0 face: Fixed in Y direction
-        m.cmsel('S', 'YNEG')
-        m.d('ALL', 'UY', 0)
-        m.allsel()
-
-        # Y=L face: Applied displacement
-        m.cmsel('S', 'YPOS')
-        m.d('ALL', 'UY', strain_val * L)
-        m.allsel()
-
-        # Couple all X-planes: All nodes at same X have same UX (plane remains flat)
-        cp_num = self._couple_all_planes('X', 'UX', cp_num)
-
-        # Couple all Z-planes: All nodes at same Z have same UZ (plane remains flat)
-        cp_num = self._couple_all_planes('Z', 'UZ', cp_num)
-
-        # Rigid body constraints
-        m.d(self.corner_node, 'UX', 0)
-        m.d(self.corner_node, 'UZ', 0)
-
-        m.allsel()
-        print(f"    Applied KUBC for Ey (ε22={strain_val})")
-
-    def apply_bc_uniaxial_z(self, strain_val=0.001):
+    def apply_bc_load_case_2(self, strain_val=0.001):
         """
-        Apply KUBC boundary conditions for uniaxial strain in Z direction (for Ez).
+        Apply Periodic BC for Load Case 2: Tensile test in Y direction.
 
-        Boundary conditions:
-        - Z=0 face: Uz=0 (fixed in loading direction)
-        - Z=L face: Uz=ε*L (displacement load)
-        - All YZ-planes (every X coordinate): nodes have same UX (planes remain flat)
-        - All XZ-planes (every Y coordinate): nodes have same UY (planes remain flat)
-        - Rigid body constraint: Corner node Ux=Uy=0
+        ε_y = strain_val, all other strain components = 0
         """
-        m = self.mapdl
-        L = self.L
+        self._apply_periodic_bc(eps_y=strain_val)
+        print(f"    Applied Periodic BC for LC2: ε_y = {strain_val}")
 
-        self._clear_all_constraints()
-
-        cp_num = 1
-
-        # Z=0 face: Fixed in Z direction
-        m.cmsel('S', 'ZNEG')
-        m.d('ALL', 'UZ', 0)
-        m.allsel()
-
-        # Z=L face: Applied displacement
-        m.cmsel('S', 'ZPOS')
-        m.d('ALL', 'UZ', strain_val * L)
-        m.allsel()
-
-        # Couple all X-planes: All nodes at same X have same UX (plane remains flat)
-        cp_num = self._couple_all_planes('X', 'UX', cp_num)
-
-        # Couple all Y-planes: All nodes at same Y have same UY (plane remains flat)
-        cp_num = self._couple_all_planes('Y', 'UY', cp_num)
-
-        # Rigid body constraints
-        m.d(self.corner_node, 'UX', 0)
-        m.d(self.corner_node, 'UY', 0)
-
-        m.allsel()
-        print(f"    Applied KUBC for Ez (ε33={strain_val})")
-
-    def apply_bc_shear_xy(self, strain_val=0.001):
+    def apply_bc_load_case_3(self, strain_val=0.001):
         """
-        Apply KUBC boundary conditions for shear strain in XY plane (for Gxy).
+        Apply Periodic BC for Load Case 3: Tensile test in Z direction.
 
-        Boundary conditions:
-        - Y=0 face: Ux=0, Uy=0 (fixed)
-        - Y=L face: Ux=γ*L (shear displacement)
-        - All XZ-planes (every Y coordinate): nodes have same UX AND UY (inclined planes remain flat)
-        - All XY-planes (every Z coordinate): nodes have same UZ (planes remain flat)
-        - Rigid body constraints
+        ε_z = strain_val, all other strain components = 0
         """
-        m = self.mapdl
-        L = self.L
+        self._apply_periodic_bc(eps_z=strain_val)
+        print(f"    Applied Periodic BC for LC3: ε_z = {strain_val}")
 
-        self._clear_all_constraints()
-
-        cp_num = 1
-
-        # Y=0 face: Fixed in X direction (transverse)
-        m.cmsel('S', 'YNEG')
-        m.d('ALL', 'UX', 0)
-        m.d('ALL', 'UY', 0)  # Also fix UY to prevent Y-translation
-        m.allsel()
-
-        # Y=L face: Shear displacement in X direction
-        m.cmsel('S', 'YPOS')
-        m.d('ALL', 'UX', strain_val * L)
-        m.allsel()
-
-        # Couple all Y-planes: All nodes at same Y have same UX (inclined plane remains flat)
-        cp_num = self._couple_all_planes('Y', 'UX', cp_num)
-
-        # Couple all Y-planes: All nodes at same Y have same UY (plane remains flat)
-        cp_num = self._couple_all_planes('Y', 'UY', cp_num)
-
-        # Couple all Z-planes: All nodes at same Z have same UZ (plane remains flat)
-        cp_num = self._couple_all_planes('Z', 'UZ', cp_num)
-
-        # Rigid body constraint - fix corner node in Z
-        m.d(self.corner_node, 'UZ', 0)
-
-        m.allsel()
-        print(f"    Applied KUBC for Gxy (γ12={strain_val})")
-
-    def apply_bc_shear_yz(self, strain_val=0.001):
+    def apply_bc_load_case_4(self, strain_val=0.001):
         """
-        Apply KUBC boundary conditions for shear strain in YZ plane (for Gyz).
+        Apply Periodic BC for Load Case 4: Shear test in XY plane.
 
-        Boundary conditions:
-        - Z=0 face: Uy=0, Uz=0 (fixed)
-        - Z=L face: Uy=γ*L (shear displacement)
-        - All XY-planes (every Z coordinate): nodes have same UY AND UZ (inclined planes remain flat)
-        - All YZ-planes (every X coordinate): nodes have same UX (planes remain flat)
-        - Rigid body constraints
+        γ_xy = strain_val, all other strain components = 0
         """
-        m = self.mapdl
-        L = self.L
+        self._apply_periodic_bc(gamma_xy=strain_val)
+        print(f"    Applied Periodic BC for LC4: γ_xy = {strain_val}")
 
-        self._clear_all_constraints()
-
-        cp_num = 1
-
-        # Z=0 face: Fixed in Y direction (transverse)
-        m.cmsel('S', 'ZNEG')
-        m.d('ALL', 'UY', 0)
-        m.d('ALL', 'UZ', 0)  # Also fix UZ
-        m.allsel()
-
-        # Z=L face: Shear displacement in Y direction
-        m.cmsel('S', 'ZPOS')
-        m.d('ALL', 'UY', strain_val * L)
-        m.allsel()
-
-        # Couple all Z-planes: All nodes at same Z have same UY (inclined plane remains flat)
-        cp_num = self._couple_all_planes('Z', 'UY', cp_num)
-
-        # Couple all Z-planes: All nodes at same Z have same UZ (plane remains flat)
-        cp_num = self._couple_all_planes('Z', 'UZ', cp_num)
-
-        # Couple all X-planes: All nodes at same X have same UX (plane remains flat)
-        cp_num = self._couple_all_planes('X', 'UX', cp_num)
-
-        # Rigid body constraint
-        m.d(self.corner_node, 'UX', 0)
-
-        m.allsel()
-        print(f"    Applied KUBC for Gyz (γ23={strain_val})")
-
-    def apply_bc_shear_zx(self, strain_val=0.001):
+    def apply_bc_load_case_5(self, strain_val=0.001):
         """
-        Apply KUBC boundary conditions for shear strain in ZX plane (for Gzx).
+        Apply Periodic BC for Load Case 5: Shear test in YZ plane.
 
-        Boundary conditions:
-        - X=0 face: Uz=0, Ux=0 (fixed)
-        - X=L face: Uz=γ*L (shear displacement)
-        - All YZ-planes (every X coordinate): nodes have same UX AND UZ (inclined planes remain flat)
-        - All XZ-planes (every Y coordinate): nodes have same UY (planes remain flat)
-        - Rigid body constraints
+        γ_yz = strain_val, all other strain components = 0
         """
-        m = self.mapdl
-        L = self.L
+        self._apply_periodic_bc(gamma_yz=strain_val)
+        print(f"    Applied Periodic BC for LC5: γ_yz = {strain_val}")
 
-        self._clear_all_constraints()
-
-        cp_num = 1
-
-        # X=0 face: Fixed in Z direction (transverse)
-        m.cmsel('S', 'XNEG')
-        m.d('ALL', 'UZ', 0)
-        m.d('ALL', 'UX', 0)  # Also fix UX
-        m.allsel()
-
-        # X=L face: Shear displacement in Z direction
-        m.cmsel('S', 'XPOS')
-        m.d('ALL', 'UZ', strain_val * L)
-        m.allsel()
-
-        # Couple all X-planes: All nodes at same X have same UZ (inclined plane remains flat)
-        cp_num = self._couple_all_planes('X', 'UZ', cp_num)
-
-        # Couple all X-planes: All nodes at same X have same UX (plane remains flat)
-        cp_num = self._couple_all_planes('X', 'UX', cp_num)
-
-        # Couple all Y-planes: All nodes at same Y have same UY (plane remains flat)
-        cp_num = self._couple_all_planes('Y', 'UY', cp_num)
-
-        # Rigid body constraint
-        m.d(self.corner_node, 'UY', 0)
-
-        m.allsel()
-        print(f"    Applied KUBC for Gzx (γ31={strain_val})")
-
-    def apply_thermal_bc(self, delta_T=1.0):
+    def apply_bc_load_case_6(self, strain_val=0.001):
         """
-        Apply thermal loading with KUBC boundary conditions.
+        Apply Periodic BC for Load Case 6: Shear test in XZ plane.
 
-        For thermal analysis:
-        - All internal planes have coupled DOF to remain planar (like homogeneous material)
-        - Free thermal expansion in all directions
-        - Minimal rigid body constraints
+        γ_xz = strain_val, all other strain components = 0
+        """
+        self._apply_periodic_bc(gamma_xz=strain_val)
+        print(f"    Applied Periodic BC for LC6: γ_xz = {strain_val}")
+
+    def apply_bc_load_case_7_thermal(self, delta_T=1.0):
+        """
+        Apply Periodic BC for Load Case 7: Thermal expansion.
+
+        Based on ANSYS 2025 R1 Theory Documentation (Equations 3.38-3.40).
+        Vanishing macroscopic strain: all strain components = 0
+        Temperature change ΔT applied uniformly.
         """
         m = self.mapdl
 
-        self._clear_all_constraints()
-
-        cp_num = 1
-
-        # Couple all planes to remain planar during thermal expansion
-        # All YZ-planes (every X coordinate): nodes have same UX
-        cp_num = self._couple_all_planes('X', 'UX', cp_num)
-
-        # All XZ-planes (every Y coordinate): nodes have same UY
-        cp_num = self._couple_all_planes('Y', 'UY', cp_num)
-
-        # All XY-planes (every Z coordinate): nodes have same UZ
-        cp_num = self._couple_all_planes('Z', 'UZ', cp_num)
-
-        # Minimal rigid body constraints - fix corner node completely
-        m.d(self.corner_node, 'UX', 0)
-        m.d(self.corner_node, 'UY', 0)
-        m.d(self.corner_node, 'UZ', 0)
-
-        m.allsel()
+        # Apply periodic BC with zero strain (Equations 3.38-3.40)
+        self._apply_periodic_bc(eps_x=0, eps_y=0, eps_z=0,
+                                gamma_xy=0, gamma_yz=0, gamma_xz=0)
 
         # Apply thermal load
-        # IMPORTANT: tref sets the reference temperature, tunif sets current uniform temp
-        # For thermal expansion: strain = alpha * (T - Tref)
         m.tref(0)  # Reference temperature = 0
         m.bfunif('TEMP', delta_T)  # Current temperature = delta_T
 
-        print(f"    Applied thermal BC (ΔT={delta_T}°C)")
+        print(f"    Applied Periodic BC for LC7: Thermal (ΔT = {delta_T}°C)")
 
     def solve(self, jobname=None):
         """Solve current load case and optionally save result file."""
@@ -709,89 +617,47 @@ class AdvancedCompositeCalculator:
         m.finish()
         return stress
 
-    def get_thermal_strain(self, delta_T=1.0):
-        """
-        Get effective thermal expansion strains from face displacements.
-
-        The thermal strains are computed from the displacement difference
-        between opposite faces:
-            ε_th = (u_pos - u_neg) / L / ΔT
-
-        With KUBC, all nodes on a face have the same normal displacement (coupled),
-        so we can use any node on each face.
-        """
-        m = self.mapdl
-        L = self.L
-
-        m.post1()
-        m.set('LAST')
-
-        # Get a representative node from each face (first node in the list)
-        node_xpos = int(self.face_nodes['XPOS'][0])
-        node_xneg = int(self.face_nodes['XNEG'][0])
-        node_ypos = int(self.face_nodes['YPOS'][0])
-        node_yneg = int(self.face_nodes['YNEG'][0])
-        node_zpos = int(self.face_nodes['ZPOS'][0])
-        node_zneg = int(self.face_nodes['ZNEG'][0])
-
-        # Get UX on X faces
-        ux_xpos = float(m.get('UX', 'NODE', node_xpos, 'U', 'X'))
-        ux_xneg = float(m.get('UX', 'NODE', node_xneg, 'U', 'X'))
-
-        # Get UY on Y faces
-        uy_ypos = float(m.get('UY', 'NODE', node_ypos, 'U', 'Y'))
-        uy_yneg = float(m.get('UY', 'NODE', node_yneg, 'U', 'Y'))
-
-        # Get UZ on Z faces
-        uz_zpos = float(m.get('UZ', 'NODE', node_zpos, 'U', 'Z'))
-        uz_zneg = float(m.get('UZ', 'NODE', node_zneg, 'U', 'Z'))
-
-        m.allsel()
-        m.finish()
-
-        # Thermal strains (CTE = strain / delta_T)
-        eps_th = np.array([
-            (ux_xpos - ux_xneg) / L / delta_T,
-            (uy_ypos - uy_yneg) / L / delta_T,
-            (uz_zpos - uz_zneg) / L / delta_T
-        ])
-
-        return eps_th
-
     def compute_stiffness_matrix(self, strain_mag=0.001):
         """
-        Compute the complete 6x6 stiffness matrix using KUBC.
+        Compute the complete 6x6 stiffness matrix [D] using Periodic BC.
+
+        Based on ANSYS 2025 R1 Theory Documentation (Equations 3.16-3.17).
+
+        For each load case, one strain component is set to strain_mag (0.001)
+        and all others are set to 0. The stiffness matrix column is computed as:
+            D_ij = σ_i / strain_mag  (Equation 3.17)
 
         Parameters
         ----------
         strain_mag : float
-            Magnitude of applied strain for each load case
+            Magnitude of applied strain for each load case (default: 0.001)
 
         Returns
         -------
-        C : ndarray
-            6x6 stiffness matrix in Voigt notation
+        D : ndarray
+            6x6 stiffness matrix in Voigt notation [D11,D12,...,D66]
         """
         print(f"\n{'='*60}")
-        print("COMPUTING STIFFNESS MATRIX (KUBC)")
+        print("COMPUTING STIFFNESS MATRIX [D] (Periodic BC)")
         print(f"{'='*60}")
+        print(f"Applied strain magnitude: {strain_mag}")
         print(f"Result files will be saved in: {self.mapdl.directory}")
 
-        C = np.zeros((6, 6))
+        D = np.zeros((6, 6))
 
-        # Define 6 load cases with corresponding BC functions
-        # Format: (direction_name, jobname, bc_function)
+        # Define 6 load cases (Equation 3.24-3.26 with one strain component = strain_mag)
+        # Format: (description, jobname, bc_function)
         load_cases = [
-            ('ε11 (Ex)', 'LC1_e11', self.apply_bc_uniaxial_x),
-            ('ε22 (Ey)', 'LC2_e22', self.apply_bc_uniaxial_y),
-            ('ε33 (Ez)', 'LC3_e33', self.apply_bc_uniaxial_z),
-            ('γ12 (Gxy)', 'LC4_g12', self.apply_bc_shear_xy),
-            ('γ23 (Gyz)', 'LC5_g23', self.apply_bc_shear_yz),
-            ('γ31 (Gzx)', 'LC6_g31', self.apply_bc_shear_zx),
+            ('LC1: ε_x (tensile X)', 'LC1_eps_x', self.apply_bc_load_case_1),
+            ('LC2: ε_y (tensile Y)', 'LC2_eps_y', self.apply_bc_load_case_2),
+            ('LC3: ε_z (tensile Z)', 'LC3_eps_z', self.apply_bc_load_case_3),
+            ('LC4: γ_xy (shear XY)', 'LC4_gamma_xy', self.apply_bc_load_case_4),
+            ('LC5: γ_yz (shear YZ)', 'LC5_gamma_yz', self.apply_bc_load_case_5),
+            ('LC6: γ_xz (shear XZ)', 'LC6_gamma_xz', self.apply_bc_load_case_6),
         ]
 
-        for i, (direction, jobname, bc_func) in enumerate(load_cases):
-            print(f"  Load case {i+1}/6: {direction}...")
+        for i, (description, jobname, bc_func) in enumerate(load_cases):
+            print(f"\n  Load case {i+1}/6: {description}...")
 
             self.mapdl.prep7()
             bc_func(strain_mag)
@@ -802,104 +668,176 @@ class AdvancedCompositeCalculator:
 
             self.solve(jobname=jobname)
 
+            # Get volume-averaged stress (Equation 3.17)
             stress = self.get_volume_avg_stress()
-            C[:, i] = stress / strain_mag
 
-            print(f"    Stress: σ11={stress[0]:.2f}, σ22={stress[1]:.2f}, σ33={stress[2]:.2f}")
-            print(f"            τ12={stress[3]:.2f}, τ23={stress[4]:.2f}, τ31={stress[5]:.2f}")
+            # D_ij = σ_i / ε_j where ε_j = strain_mag
+            D[:, i] = stress / strain_mag
 
-        # Symmetrize the matrix (should be symmetric for linear elastic)
-        C = 0.5 * (C + C.T)
+            print(f"    Stress [MPa]: σ_x={stress[0]:.2f}, σ_y={stress[1]:.2f}, σ_z={stress[2]:.2f}")
+            print(f"                  τ_xy={stress[3]:.2f}, τ_yz={stress[4]:.2f}, τ_xz={stress[5]:.2f}")
 
-        self.stiffness_matrix = C
-        print("  Stiffness matrix computed")
+        # Symmetrize the matrix (should be symmetric for linear elastic material)
+        D = 0.5 * (D + D.T)
 
-        return C
+        self.stiffness_matrix = D
+        print(f"\n  Stiffness matrix [D] computed successfully")
+
+        return D
 
     def compute_engineering_constants(self):
         """
         Compute engineering constants from stiffness matrix.
 
+        Based on ANSYS 2025 R1 Theory Documentation (Equations 3.22-3.23).
+
+        Compliance matrix: [C] = [D]^(-1)
+
+        The compliance matrix has the form (Equation 3.23):
+            [C] = | 1/E_x      -ν_yx/E_y  -ν_zx/E_z                    |
+                  | -ν_xy/E_x  1/E_y      -ν_zy/E_z                    |
+                  | -ν_xz/E_x  -ν_yz/E_y  1/E_z                        |
+                  |                       1/G_xy                       |
+                  |                              1/G_yz                |
+                  |                                     1/G_xz         |
+
         Returns
         -------
         props : dict
-            Dictionary containing Ex, Ey, Ez, Gxy, Gyz, Gzx, nuxy, nuyz, nuzx
+            Dictionary containing E_x, E_y, E_z, G_xy, G_yz, G_xz,
+            nu_xy, nu_yz, nu_xz (and symmetric nu_yx, nu_zy, nu_zx)
         """
         if self.stiffness_matrix is None:
             raise ValueError("Stiffness matrix not computed. Run compute_stiffness_matrix first.")
 
-        C = self.stiffness_matrix
+        D = self.stiffness_matrix
 
-        # Compute compliance matrix S = C^(-1)
+        # Compute compliance matrix [C] = [D]^(-1) (Equation 3.22)
         try:
-            S = np.linalg.inv(C)
+            C = np.linalg.inv(D)
         except np.linalg.LinAlgError:
             print("Warning: Stiffness matrix is singular. Using pseudo-inverse.")
-            S = np.linalg.pinv(C)
+            C = np.linalg.pinv(D)
 
-        self.compliance_matrix = S
+        self.compliance_matrix = C
 
-        # Extract engineering constants from compliance matrix
-        # S11 = 1/Ex, S22 = 1/Ey, S33 = 1/Ez
-        # S44 = 1/Gyz, S55 = 1/Gzx, S66 = 1/Gxy
-        # S12 = -nuxy/Ex, S13 = -nuxz/Ex, S23 = -nuyz/Ey
+        # Extract engineering constants from compliance matrix (Equation 3.23)
+        # Diagonal terms: C_ii = 1/E_i or 1/G_ij
+        # Off-diagonal terms: C_ij = -nu_ji/E_j
 
-        Ex = 1.0 / S[0, 0]
-        Ey = 1.0 / S[1, 1]
-        Ez = 1.0 / S[2, 2]
+        # Elastic moduli
+        Ex = 1.0 / C[0, 0]  # E_x
+        Ey = 1.0 / C[1, 1]  # E_y
+        Ez = 1.0 / C[2, 2]  # E_z
 
-        # Shear moduli (indices 3,4,5 correspond to 12,23,31 in our convention)
-        Gxy = 1.0 / S[3, 3]  # γ12
-        Gyz = 1.0 / S[4, 4]  # γ23
-        Gzx = 1.0 / S[5, 5]  # γ31
+        # Shear moduli
+        Gxy = 1.0 / C[3, 3]  # G_xy
+        Gyz = 1.0 / C[4, 4]  # G_yz
+        Gxz = 1.0 / C[5, 5]  # G_xz
 
-        nuxy = -S[0, 1] * Ex
-        nuyz = -S[1, 2] * Ey
-        nuzx = -S[2, 0] * Ez
+        # Poisson's ratios from compliance matrix
+        # C[0,1] = -nu_yx/E_y => nu_yx = -C[0,1] * E_y
+        # C[1,0] = -nu_xy/E_x => nu_xy = -C[1,0] * E_x
+        nu_xy = -C[1, 0] * Ex  # -ν_xy/E_x
+        nu_yx = -C[0, 1] * Ey  # -ν_yx/E_y
+
+        # C[0,2] = -nu_zx/E_z => nu_zx = -C[0,2] * E_z
+        # C[2,0] = -nu_xz/E_x => nu_xz = -C[2,0] * E_x
+        nu_xz = -C[2, 0] * Ex  # -ν_xz/E_x
+        nu_zx = -C[0, 2] * Ez  # -ν_zx/E_z
+
+        # C[1,2] = -nu_zy/E_z => nu_zy = -C[1,2] * E_z
+        # C[2,1] = -nu_yz/E_y => nu_yz = -C[2,1] * E_y
+        nu_yz = -C[2, 1] * Ey  # -ν_yz/E_y
+        nu_zy = -C[1, 2] * Ez  # -ν_zy/E_z
 
         self.effective_props.update({
             'Ex': Ex, 'Ey': Ey, 'Ez': Ez,
-            'Gxy': Gxy, 'Gyz': Gyz, 'Gzx': Gzx,
-            'nuxy': nuxy, 'nuyz': nuyz, 'nuzx': nuzx
+            'Gxy': Gxy, 'Gyz': Gyz, 'Gxz': Gxz,
+            'nu_xy': nu_xy, 'nu_yx': nu_yx,
+            'nu_xz': nu_xz, 'nu_zx': nu_zx,
+            'nu_yz': nu_yz, 'nu_zy': nu_zy
         })
 
         return self.effective_props
 
     def compute_thermal_expansion(self, delta_T=1.0):
         """
-        Compute effective thermal expansion coefficients.
+        Compute effective secant thermal expansion coefficients.
+
+        Based on ANSYS 2025 R1 Theory Documentation (Equations 3.34-3.37).
+
+        For orthotropic linear elastic material with thermal strain:
+            {ε} = {ε^th} + [D]^(-1){σ}   (Equation 3.34)
+
+        With vanishing macroscopic strain {ε} = 0 and temperature change ΔT:
+            {ε^th} = -[D]^(-1){σ}         (Equation 3.36)
+
+        The secant thermal expansion coefficients are:
+            {α^se} = -1/ΔT * [D]^(-1) * {σ}   (Equation 3.37)
+
+        where {σ} is the stress obtained from boundary reactions with
+        vanishing macroscopic strain (Equations 3.38-3.40).
 
         Parameters
         ----------
         delta_T : float
-            Temperature change
+            Temperature change (default: 1.0°C)
 
         Returns
         -------
         cte : dict
-            Dictionary containing CTEx, CTEy, CTEz
+            Dictionary containing alpha_x, alpha_y, alpha_z (secant CTE)
         """
         print(f"\n{'='*60}")
-        print("COMPUTING THERMAL EXPANSION COEFFICIENTS")
+        print("COMPUTING THERMAL EXPANSION COEFFICIENTS (Equation 3.37)")
         print(f"{'='*60}")
+        print(f"Temperature change ΔT = {delta_T}°C")
 
+        if self.stiffness_matrix is None:
+            raise ValueError("Stiffness matrix not computed. Run compute_stiffness_matrix first.")
+
+        if self.compliance_matrix is None:
+            # Compute compliance matrix if not available
+            self.compliance_matrix = np.linalg.inv(self.stiffness_matrix)
+
+        # Apply LC7: Thermal load with vanishing macroscopic strain
         self.mapdl.prep7()
-        self.apply_thermal_bc(delta_T)
+        self.apply_bc_load_case_7_thermal(delta_T)
+
+        # Save DB before solving
+        self.mapdl.save('step4_LC7_thermal_bc.db')
+        print(f"    Saved: step4_LC7_thermal_bc.db")
+
         self.solve(jobname='LC7_thermal')
 
-        eps_th = self.get_thermal_strain(delta_T)
+        # Get volume-averaged stress from thermal load case
+        stress = self.get_volume_avg_stress()
+        print(f"    Thermal stress [MPa]: σ_x={stress[0]:.2f}, σ_y={stress[1]:.2f}, σ_z={stress[2]:.2f}")
+        print(f"                          τ_xy={stress[3]:.2f}, τ_yz={stress[4]:.2f}, τ_xz={stress[5]:.2f}")
 
-        CTEx = eps_th[0]
-        CTEy = eps_th[1]
-        CTEz = eps_th[2]
+        # Compute secant thermal expansion coefficients (Equation 3.37)
+        # {α^se} = -1/ΔT * [C] * {σ} where [C] = [D]^(-1)
+        C = self.compliance_matrix
+        alpha_se = -1.0 / delta_T * np.dot(C, stress)
+
+        # Extract normal components (shear components should be ~0)
+        alpha_x = alpha_se[0]
+        alpha_y = alpha_se[1]
+        alpha_z = alpha_se[2]
 
         self.effective_props.update({
-            'CTEx': CTEx, 'CTEy': CTEy, 'CTEz': CTEz
+            'alpha_x': alpha_x,
+            'alpha_y': alpha_y,
+            'alpha_z': alpha_z
         })
 
-        print(f"  CTE computed: [{CTEx:.2e}, {CTEy:.2e}, {CTEz:.2e}] 1/°C")
+        print(f"\n  Secant CTE computed (Equation 3.37):")
+        print(f"    α_x = {alpha_x:.2e} 1/°C")
+        print(f"    α_y = {alpha_y:.2e} 1/°C")
+        print(f"    α_z = {alpha_z:.2e} 1/°C")
 
-        return {'CTEx': CTEx, 'CTEy': CTEy, 'CTEz': CTEz}
+        return {'alpha_x': alpha_x, 'alpha_y': alpha_y, 'alpha_z': alpha_z}
 
     def run_full_analysis(self, n_div=10, strain_mag=0.001):
         """
@@ -941,10 +879,11 @@ class AdvancedCompositeCalculator:
 
         print(f"\n{'='*60}")
         print("EFFECTIVE MATERIAL PROPERTIES")
+        print("Based on ANSYS 2025 R1 Theory Documentation")
         print(f"{'='*60}")
 
         print(f"\nInput Parameters:")
-        print(f"  RVE size: {self.L} mm")
+        print(f"  RVE size: {self.L} x {self.L} x {self.L} mm")
         print(f"  Fiber volume fraction: {self.Vf*100:.1f}%")
         print(f"  Fiber half-width: {self.fiber_half_width:.4f} mm")
 
@@ -959,34 +898,42 @@ class AdvancedCompositeCalculator:
         print(f"  α = {self.mat_props['fiber']['alpha']:.2e} 1/°C")
 
         print(f"\n{'-'*60}")
-        print("COMPUTED EFFECTIVE PROPERTIES")
+        print("COMPUTED EFFECTIVE PROPERTIES (Equations 3.22-3.23)")
         print(f"{'-'*60}")
 
-        print(f"\n--- Elastic Moduli [MPa] ---")
-        print(f"  Ex = {p.get('Ex', 0):.2f}")
-        print(f"  Ey = {p.get('Ey', 0):.2f}")
-        print(f"  Ez = {p.get('Ez', 0):.2f}")
+        print(f"\n--- Elastic Moduli E [MPa] ---")
+        print(f"  E_x = {p.get('Ex', 0):.2f}")
+        print(f"  E_y = {p.get('Ey', 0):.2f}")
+        print(f"  E_z = {p.get('Ez', 0):.2f}")
 
-        print(f"\n--- Shear Moduli [MPa] ---")
-        print(f"  Gxy = {p.get('Gxy', 0):.2f}")
-        print(f"  Gyz = {p.get('Gyz', 0):.2f}")
-        print(f"  Gzx = {p.get('Gzx', 0):.2f}")
+        print(f"\n--- Shear Moduli G [MPa] ---")
+        print(f"  G_xy = {p.get('Gxy', 0):.2f}")
+        print(f"  G_yz = {p.get('Gyz', 0):.2f}")
+        print(f"  G_xz = {p.get('Gxz', 0):.2f}")
 
-        print(f"\n--- Poisson's Ratios ---")
-        print(f"  νxy = {p.get('nuxy', 0):.4f}")
-        print(f"  νyz = {p.get('nuyz', 0):.4f}")
-        print(f"  νzx = {p.get('nuzx', 0):.4f}")
+        print(f"\n--- Poisson's Ratios ν ---")
+        print(f"  ν_xy = {p.get('nu_xy', 0):.4f}    ν_yx = {p.get('nu_yx', 0):.4f}")
+        print(f"  ν_xz = {p.get('nu_xz', 0):.4f}    ν_zx = {p.get('nu_zx', 0):.4f}")
+        print(f"  ν_yz = {p.get('nu_yz', 0):.4f}    ν_zy = {p.get('nu_zy', 0):.4f}")
 
-        print(f"\n--- Thermal Expansion Coefficients [1/°C] ---")
-        print(f"  CTEx = {p.get('CTEx', 0):.2e}")
-        print(f"  CTEy = {p.get('CTEy', 0):.2e}")
-        print(f"  CTEz = {p.get('CTEz', 0):.2e}")
+        print(f"\n--- Secant Thermal Expansion Coefficients α [1/°C] (Eq. 3.37) ---")
+        print(f"  α_x = {p.get('alpha_x', 0):.2e}")
+        print(f"  α_y = {p.get('alpha_y', 0):.2e}")
+        print(f"  α_z = {p.get('alpha_z', 0):.2e}")
 
         if self.stiffness_matrix is not None:
-            print(f"\n--- Stiffness Matrix C [MPa] ---")
-            C = self.stiffness_matrix
+            print(f"\n--- Stiffness Matrix [D] [MPa] (Eq. 3.16) ---")
+            D = self.stiffness_matrix
+            labels = ['D11', 'D21', 'D31', 'D41', 'D51', 'D61']
             for i in range(6):
-                row = [f"{C[i,j]:12.2f}" for j in range(6)]
+                row = [f"{D[i,j]:12.2f}" for j in range(6)]
+                print(f"  [{' '.join(row)}]")
+
+        if self.compliance_matrix is not None:
+            print(f"\n--- Compliance Matrix [C] = [D]^(-1) [1/MPa] (Eq. 3.22-3.23) ---")
+            C = self.compliance_matrix
+            for i in range(6):
+                row = [f"{C[i,j]:12.2e}" for j in range(6)]
                 print(f"  [{' '.join(row)}]")
 
         print(f"\n{'='*60}")

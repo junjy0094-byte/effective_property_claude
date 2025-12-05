@@ -324,6 +324,71 @@ class AdvancedCompositeCalculator:
 
         return cp_num
 
+    def _apply_linear_shear_constraint(self, shear_dir, disp_dof, coord_dir, start_ce_num):
+        """
+        Apply linear constraint for shear deformation: displacement proportional to coordinate.
+
+        For example, in XY shear: UX = (Y/L) * UX_master
+        This ensures the shear strain is uniform throughout the RVE.
+
+        Parameters
+        ----------
+        shear_dir : str
+            Direction of shear displacement ('X', 'Y', or 'Z')
+        disp_dof : str
+            Displacement DOF to constrain ('UX', 'UY', or 'UZ')
+        coord_dir : str
+            Coordinate direction that displacement is proportional to ('X', 'Y', or 'Z')
+        start_ce_num : int
+            Starting constraint equation number
+
+        Returns
+        -------
+        int
+            Next available constraint equation number
+        """
+        m = self.mapdl
+        L = self.L
+        tol = 1e-6
+
+        # Get all nodes and their coordinates
+        m.nsel('ALL')
+        all_nodes = m.mesh.nodes
+        node_nums = m.mesh.nnum
+
+        # Get coordinate index
+        coord_idx = {'X': 0, 'Y': 1, 'Z': 2}[coord_dir]
+        coords = all_nodes[:, coord_idx]
+
+        # Find master node at coord_dir = L (the loaded face)
+        # Select nodes at max coordinate
+        m.nsel('S', 'LOC', coord_dir, L - tol, L + tol)
+        master_nodes = m.mesh.nnum
+        master_node = int(master_nodes[0])  # Use first node as master
+        m.allsel()
+
+        ce_num = start_ce_num
+
+        # For each node, create CE: disp_dof_i - (coord_i/L) * disp_dof_master = 0
+        # Skip nodes at coord=0 (fixed) and coord=L (master nodes)
+        for i, node in enumerate(node_nums):
+            coord_val = coords[i]
+
+            # Skip boundary nodes (coord=0 or coord=L)
+            if coord_val < tol or coord_val > L - tol:
+                continue
+
+            # Ratio of coordinate to L
+            ratio = coord_val / L
+
+            # CE command: C1*NODE1.DOF + C2*NODE2.DOF = CONST
+            # We want: UX_node - ratio * UX_master = 0
+            # CE, NEQN, CONST, NODE1, Lab1, C1, NODE2, Lab2, C2
+            m.ce(ce_num, 0, int(node), disp_dof, 1.0, master_node, disp_dof, -ratio)
+            ce_num += 1
+
+        return ce_num
+
     def apply_bc_uniaxial_x(self, strain_val=0.001):
         """
         Apply KUBC boundary conditions for uniaxial strain in X direction (for Ex).
@@ -331,7 +396,8 @@ class AdvancedCompositeCalculator:
         Boundary conditions:
         - X=0 face: Ux=0 (fixed in loading direction)
         - X=L face: Ux=ε*L (displacement load)
-        - All YZ-planes (every Y coordinate): nodes have same UY (planes remain flat)
+        - All YZ-planes (every X coordinate): nodes have same UX (planes remain flat)
+        - All XZ-planes (every Y coordinate): nodes have same UY (planes remain flat)
         - All XY-planes (every Z coordinate): nodes have same UZ (planes remain flat)
         - Rigid body constraint: Corner node Uy=Uz=0
         """
@@ -351,6 +417,9 @@ class AdvancedCompositeCalculator:
         m.cmsel('S', 'XPOS')
         m.d('ALL', 'UX', strain_val * L)
         m.allsel()
+
+        # Couple all X-planes: All nodes at same X have same UX (loading direction - plane remains flat)
+        cp_num = self._couple_all_planes('X', 'UX', cp_num)
 
         # Couple all Y-planes: All nodes at same Y have same UY (plane remains flat)
         cp_num = self._couple_all_planes('Y', 'UY', cp_num)
@@ -373,6 +442,7 @@ class AdvancedCompositeCalculator:
         - Y=0 face: Uy=0 (fixed in loading direction)
         - Y=L face: Uy=ε*L (displacement load)
         - All YZ-planes (every X coordinate): nodes have same UX (planes remain flat)
+        - All XZ-planes (every Y coordinate): nodes have same UY (planes remain flat)
         - All XY-planes (every Z coordinate): nodes have same UZ (planes remain flat)
         - Rigid body constraint: Corner node Ux=Uz=0
         """
@@ -396,6 +466,9 @@ class AdvancedCompositeCalculator:
         # Couple all X-planes: All nodes at same X have same UX (plane remains flat)
         cp_num = self._couple_all_planes('X', 'UX', cp_num)
 
+        # Couple all Y-planes: All nodes at same Y have same UY (loading direction - plane remains flat)
+        cp_num = self._couple_all_planes('Y', 'UY', cp_num)
+
         # Couple all Z-planes: All nodes at same Z have same UZ (plane remains flat)
         cp_num = self._couple_all_planes('Z', 'UZ', cp_num)
 
@@ -415,6 +488,7 @@ class AdvancedCompositeCalculator:
         - Z=L face: Uz=ε*L (displacement load)
         - All YZ-planes (every X coordinate): nodes have same UX (planes remain flat)
         - All XZ-planes (every Y coordinate): nodes have same UY (planes remain flat)
+        - All XY-planes (every Z coordinate): nodes have same UZ (planes remain flat)
         - Rigid body constraint: Corner node Ux=Uy=0
         """
         m = self.mapdl
@@ -440,6 +514,9 @@ class AdvancedCompositeCalculator:
         # Couple all Y-planes: All nodes at same Y have same UY (plane remains flat)
         cp_num = self._couple_all_planes('Y', 'UY', cp_num)
 
+        # Couple all Z-planes: All nodes at same Z have same UZ (loading direction - plane remains flat)
+        cp_num = self._couple_all_planes('Z', 'UZ', cp_num)
+
         # Rigid body constraints
         m.d(self.corner_node, 'UX', 0)
         m.d(self.corner_node, 'UY', 0)
@@ -454,7 +531,8 @@ class AdvancedCompositeCalculator:
         Boundary conditions:
         - Y=0 face: Ux=0, Uy=0 (fixed)
         - Y=L face: Ux=γ*L (shear displacement)
-        - All XZ-planes (every Y coordinate): nodes have same UX AND UY (inclined planes remain flat)
+        - Linear shear: UX proportional to Y coordinate (UX = Y/L * UX_max)
+        - All XZ-planes (every Y coordinate): nodes have same UY (planes remain flat)
         - All XY-planes (every Z coordinate): nodes have same UZ (planes remain flat)
         - Rigid body constraints
         """
@@ -464,6 +542,7 @@ class AdvancedCompositeCalculator:
         self._clear_all_constraints()
 
         cp_num = 1
+        ce_num = 1
 
         # Y=0 face: Fixed in X direction (transverse)
         m.cmsel('S', 'YNEG')
@@ -476,8 +555,9 @@ class AdvancedCompositeCalculator:
         m.d('ALL', 'UX', strain_val * L)
         m.allsel()
 
-        # Couple all Y-planes: All nodes at same Y have same UX (inclined plane remains flat)
-        cp_num = self._couple_all_planes('Y', 'UX', cp_num)
+        # Apply linear shear constraint: UX = (Y/L) * UX_max
+        # This ensures uniform shear strain throughout
+        ce_num = self._apply_linear_shear_constraint('X', 'UX', 'Y', ce_num)
 
         # Couple all Y-planes: All nodes at same Y have same UY (plane remains flat)
         cp_num = self._couple_all_planes('Y', 'UY', cp_num)
@@ -498,7 +578,8 @@ class AdvancedCompositeCalculator:
         Boundary conditions:
         - Z=0 face: Uy=0, Uz=0 (fixed)
         - Z=L face: Uy=γ*L (shear displacement)
-        - All XY-planes (every Z coordinate): nodes have same UY AND UZ (inclined planes remain flat)
+        - Linear shear: UY proportional to Z coordinate (UY = Z/L * UY_max)
+        - All XY-planes (every Z coordinate): nodes have same UZ (planes remain flat)
         - All YZ-planes (every X coordinate): nodes have same UX (planes remain flat)
         - Rigid body constraints
         """
@@ -508,6 +589,7 @@ class AdvancedCompositeCalculator:
         self._clear_all_constraints()
 
         cp_num = 1
+        ce_num = 1
 
         # Z=0 face: Fixed in Y direction (transverse)
         m.cmsel('S', 'ZNEG')
@@ -520,8 +602,8 @@ class AdvancedCompositeCalculator:
         m.d('ALL', 'UY', strain_val * L)
         m.allsel()
 
-        # Couple all Z-planes: All nodes at same Z have same UY (inclined plane remains flat)
-        cp_num = self._couple_all_planes('Z', 'UY', cp_num)
+        # Apply linear shear constraint: UY = (Z/L) * UY_max
+        ce_num = self._apply_linear_shear_constraint('Y', 'UY', 'Z', ce_num)
 
         # Couple all Z-planes: All nodes at same Z have same UZ (plane remains flat)
         cp_num = self._couple_all_planes('Z', 'UZ', cp_num)
@@ -542,7 +624,8 @@ class AdvancedCompositeCalculator:
         Boundary conditions:
         - X=0 face: Uz=0, Ux=0 (fixed)
         - X=L face: Uz=γ*L (shear displacement)
-        - All YZ-planes (every X coordinate): nodes have same UX AND UZ (inclined planes remain flat)
+        - Linear shear: UZ proportional to X coordinate (UZ = X/L * UZ_max)
+        - All YZ-planes (every X coordinate): nodes have same UX (planes remain flat)
         - All XZ-planes (every Y coordinate): nodes have same UY (planes remain flat)
         - Rigid body constraints
         """
@@ -552,6 +635,7 @@ class AdvancedCompositeCalculator:
         self._clear_all_constraints()
 
         cp_num = 1
+        ce_num = 1
 
         # X=0 face: Fixed in Z direction (transverse)
         m.cmsel('S', 'XNEG')
@@ -564,8 +648,8 @@ class AdvancedCompositeCalculator:
         m.d('ALL', 'UZ', strain_val * L)
         m.allsel()
 
-        # Couple all X-planes: All nodes at same X have same UZ (inclined plane remains flat)
-        cp_num = self._couple_all_planes('X', 'UZ', cp_num)
+        # Apply linear shear constraint: UZ = (X/L) * UZ_max
+        ce_num = self._apply_linear_shear_constraint('Z', 'UZ', 'X', ce_num)
 
         # Couple all X-planes: All nodes at same X have same UX (plane remains flat)
         cp_num = self._couple_all_planes('X', 'UX', cp_num)

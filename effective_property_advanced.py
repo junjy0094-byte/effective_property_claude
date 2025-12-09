@@ -409,10 +409,8 @@ class AdvancedCompositeCalculator:
         # Create node number to index mapping
         nnum_to_idx = {n: i for i, n in enumerate(all_nnum)}
 
-        # Apply linear displacement field to all boundary nodes (Eq 3.24-3.26)
-        # u_x = eps_x * x
-        # u_y = gamma_xy * x + eps_y * y
-        # u_z = gamma_xz * x + gamma_yz * y + eps_z * z
+        # Build all D commands as strings and send in batch for performance
+        d_commands = []
         for node_num in boundary_nodes:
             idx = nnum_to_idx[node_num]
             x, y, z = all_nodes[idx]
@@ -421,9 +419,13 @@ class AdvancedCompositeCalculator:
             uy = gamma_xy * x + eps_y * y
             uz = gamma_xz * x + gamma_yz * y + eps_z * z
 
-            m.d(int(node_num), 'UX', ux)
-            m.d(int(node_num), 'UY', uy)
-            m.d(int(node_num), 'UZ', uz)
+            d_commands.append(f"D,{int(node_num)},UX,{ux}")
+            d_commands.append(f"D,{int(node_num)},UY,{uy}")
+            d_commands.append(f"D,{int(node_num)},UZ,{uz}")
+
+        # Send all commands at once (much faster than individual calls)
+        if d_commands:
+            m.input_strings(d_commands)
 
         m.allsel()
 
@@ -455,53 +457,58 @@ class AdvancedCompositeCalculator:
 
         self._clear_all_constraints()
 
+        # Build all CE commands as strings and send in batch for performance
+        ce_commands = []
         ce_num = 1  # Constraint equation counter
 
         # X-direction periodic BC (Equation 3.24)
-        # u_pos - u_neg = offset
         # CE format: CE,NEQN,CONST, NODE1,Lab1,C1, NODE2,Lab2,C2, ...
         # CONST + C1*NODE1.Lab1 + C2*NODE2.Lab2 = 0
         # For u_neg - u_pos = -offset:  offset + 1*u_neg + (-1)*u_pos = 0
         for (n_neg, n_pos) in self.node_pairs['X']:
             # UX: u_x(L_x) - u_x(0) = eps_x * L_x
-            m.ce(ce_num, eps_x * Lx, n_neg, 'UX', 1, n_pos, 'UX', -1)
+            ce_commands.append(f"CE,{ce_num},{eps_x * Lx},{n_neg},UX,1,{n_pos},UX,-1")
             ce_num += 1
 
             # UY: u_y(L_x) - u_y(0) = gamma_xy * L_x
-            m.ce(ce_num, gamma_xy * Lx, n_neg, 'UY', 1, n_pos, 'UY', -1)
+            ce_commands.append(f"CE,{ce_num},{gamma_xy * Lx},{n_neg},UY,1,{n_pos},UY,-1")
             ce_num += 1
 
             # UZ: u_z(L_x) - u_z(0) = gamma_xz * L_x
-            m.ce(ce_num, gamma_xz * Lx, n_neg, 'UZ', 1, n_pos, 'UZ', -1)
+            ce_commands.append(f"CE,{ce_num},{gamma_xz * Lx},{n_neg},UZ,1,{n_pos},UZ,-1")
             ce_num += 1
 
         # Y-direction periodic BC (Equation 3.25)
         for (n_neg, n_pos) in self.node_pairs['Y']:
             # UX: u_x(L_y) - u_x(0) = 0
-            m.ce(ce_num, 0, n_neg, 'UX', 1, n_pos, 'UX', -1)
+            ce_commands.append(f"CE,{ce_num},0,{n_neg},UX,1,{n_pos},UX,-1")
             ce_num += 1
 
             # UY: u_y(L_y) - u_y(0) = eps_y * L_y
-            m.ce(ce_num, eps_y * Ly, n_neg, 'UY', 1, n_pos, 'UY', -1)
+            ce_commands.append(f"CE,{ce_num},{eps_y * Ly},{n_neg},UY,1,{n_pos},UY,-1")
             ce_num += 1
 
             # UZ: u_z(L_y) - u_z(0) = gamma_yz * L_y
-            m.ce(ce_num, gamma_yz * Ly, n_neg, 'UZ', 1, n_pos, 'UZ', -1)
+            ce_commands.append(f"CE,{ce_num},{gamma_yz * Ly},{n_neg},UZ,1,{n_pos},UZ,-1")
             ce_num += 1
 
         # Z-direction periodic BC (Equation 3.26)
         for (n_neg, n_pos) in self.node_pairs['Z']:
             # UX: u_x(L_z) - u_x(0) = 0
-            m.ce(ce_num, 0, n_neg, 'UX', 1, n_pos, 'UX', -1)
+            ce_commands.append(f"CE,{ce_num},0,{n_neg},UX,1,{n_pos},UX,-1")
             ce_num += 1
 
             # UY: u_y(L_z) - u_y(0) = 0
-            m.ce(ce_num, 0, n_neg, 'UY', 1, n_pos, 'UY', -1)
+            ce_commands.append(f"CE,{ce_num},0,{n_neg},UY,1,{n_pos},UY,-1")
             ce_num += 1
 
             # UZ: u_z(L_z) - u_z(0) = eps_z * L_z
-            m.ce(ce_num, eps_z * Lz, n_neg, 'UZ', 1, n_pos, 'UZ', -1)
+            ce_commands.append(f"CE,{ce_num},{eps_z * Lz},{n_neg},UZ,1,{n_pos},UZ,-1")
             ce_num += 1
+
+        # Send all CE commands at once (much faster than individual calls)
+        if ce_commands:
+            m.input_strings(ce_commands)
 
         # Rigid body constraints (Equation 3.27)
         # u_x(point with x=0) = 0

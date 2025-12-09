@@ -76,6 +76,7 @@ class AdvancedCompositeCalculator:
         }
 
         self.mapdl = None
+        self.element_type = 'SOLID185'  # Default element type
         self.face_nodes = {}    # Node lists for each face
         self.node_pairs = {}    # Node pairs for periodic BC (X, Y, Z directions)
         self.rigid_body_nodes = {}  # Nodes for rigid body constraints
@@ -147,6 +148,7 @@ class AdvancedCompositeCalculator:
         m.mp('ALPX', 2, fp['alpha'])
 
         # Element type: SOLID185 (8-node hex) or SOLID187 (10-node tet)
+        self.element_type = element_type
         m.et(1, element_type)
         print(f"Element type: {element_type}")
 
@@ -350,9 +352,76 @@ class AdvancedCompositeCalculator:
     def _apply_periodic_bc(self, eps_x=0.0, eps_y=0.0, eps_z=0.0,
                            gamma_xy=0.0, gamma_yz=0.0, gamma_xz=0.0):
         """
+        Apply Boundary Conditions based on element type.
+
+        For SOLID185 (hex, mapped mesh): Periodic BC using Constraint Equations
+        For SOLID187 (tet, free mesh): Uniform Displacement BC (KUBC)
+
+        Parameters
+        ----------
+        eps_x, eps_y, eps_z : float
+            Normal strain components
+        gamma_xy, gamma_yz, gamma_xz : float
+            Shear strain components
+        """
+        if self.element_type == 'SOLID187':
+            self._apply_uniform_displacement_bc(eps_x, eps_y, eps_z,
+                                                gamma_xy, gamma_yz, gamma_xz)
+        else:
+            self._apply_periodic_bc_hex(eps_x, eps_y, eps_z,
+                                        gamma_xy, gamma_yz, gamma_xz)
+
+    def _apply_uniform_displacement_bc(self, eps_x=0.0, eps_y=0.0, eps_z=0.0,
+                                        gamma_xy=0.0, gamma_yz=0.0, gamma_xz=0.0):
+        """
+        Apply Uniform Displacement BC (KUBC) for SOLID187 free mesh.
+
+        This is used when node pairing is not available due to free meshing.
+        """
+        m = self.mapdl
+        Lx, Ly, Lz = self.Lx, self.Ly, self.Lz
+
+        self._clear_all_constraints()
+
+        # X- face: fix UX=0
+        m.cmsel('S', 'XNEG')
+        m.d('ALL', 'UX', 0)
+
+        # X+ face: UX = eps_x * Lx, UY = gamma_xy * Lx, UZ = gamma_xz * Lx
+        m.cmsel('S', 'XPOS')
+        m.d('ALL', 'UX', eps_x * Lx)
+        if gamma_xy != 0:
+            m.d('ALL', 'UY', gamma_xy * Lx)
+        if gamma_xz != 0:
+            m.d('ALL', 'UZ', gamma_xz * Lx)
+
+        # Y- face: fix UY=0
+        m.cmsel('S', 'YNEG')
+        m.d('ALL', 'UY', 0)
+
+        # Y+ face: UY = eps_y * Ly, UZ = gamma_yz * Ly
+        m.cmsel('S', 'YPOS')
+        m.d('ALL', 'UY', eps_y * Ly)
+        if gamma_yz != 0:
+            m.d('ALL', 'UZ', gamma_yz * Ly)
+
+        # Z- face: fix UZ=0
+        m.cmsel('S', 'ZNEG')
+        m.d('ALL', 'UZ', 0)
+
+        # Z+ face: UZ = eps_z * Lz
+        m.cmsel('S', 'ZPOS')
+        m.d('ALL', 'UZ', eps_z * Lz)
+
+        m.allsel()
+
+    def _apply_periodic_bc_hex(self, eps_x=0.0, eps_y=0.0, eps_z=0.0,
+                                gamma_xy=0.0, gamma_yz=0.0, gamma_xz=0.0):
+        """
         Apply Periodic Boundary Conditions using Constraint Equations.
 
         Based on ANSYS 2025 R1 Theory Documentation (Equations 3.24-3.27).
+        Used for SOLID185 with mapped hex mesh where node pairing is available.
 
         On X-faces (Equation 3.24):
             u_x(L_x,y,z) = u_x(0,y,z) + ε_x * L_x
@@ -368,13 +437,6 @@ class AdvancedCompositeCalculator:
             u_x(x,y,L_z) = u_x(x,y,0)
             u_y(x,y,L_z) = u_y(x,y,0)
             u_z(x,y,L_z) = u_z(x,y,0) + ε_z * L_z
-
-        Parameters
-        ----------
-        eps_x, eps_y, eps_z : float
-            Normal strain components
-        gamma_xy, gamma_yz, gamma_xz : float
-            Shear strain components
         """
         m = self.mapdl
         Lx, Ly, Lz = self.Lx, self.Ly, self.Lz

@@ -109,14 +109,17 @@ class AdvancedCompositeCalculator:
             self.mapdl.exit()
             self.mapdl = None
 
-    def build_model(self, n_div=10, element_type='SOLID185'):
+    def build_model(self, ele_size=0.05, n_div=None, element_type='SOLID185'):
         """
         Build the RVE model with mapped hex mesh.
 
         Parameters
         ----------
-        n_div : int
-            Number of element divisions along each edge
+        ele_size : float
+            Element size in mm (default: 0.05)
+        n_div : int, optional
+            Number of element divisions along each edge. If provided, overrides ele_size
+            for line sizing (SOLID185 only).
         element_type : str
             Element type: 'SOLID185' (8-node hex) or 'SOLID187' (10-node tet)
         """
@@ -183,13 +186,18 @@ class AdvancedCompositeCalculator:
             m.mshkey(1)  # Mapped meshing for hex elements
             m.mshape(0, '3D')  # Hex elements
 
+        # Set element size
+        m.esize(ele_size)
+
         # Create, assign material, and mesh each volume
         for i, (xs, xe, ys, ye, mat_id) in enumerate(regions):
             m.block(xs, xe, ys, ye, 0, L)
             vol_num = i + 1
-            m.lsel('S', 'VOLU', '', vol_num)
-            m.lesize('ALL', '', '', n_div)
             m.vsel('S', 'VOLU', '', vol_num)
+            # Use n_div for line sizing if provided (SOLID185 only)
+            if n_div is not None and element_type == 'SOLID185':
+                m.lsel('S', 'VOLU', '', vol_num)
+                m.lesize('ALL', '', '', n_div)
             m.vatt(mat_id, '', 1)
             m.vmesh(vol_num)
 
@@ -884,18 +892,20 @@ class AdvancedCompositeCalculator:
 
         return {'alpha_x': alpha_x, 'alpha_y': alpha_y, 'alpha_z': alpha_z}
 
-    def run_full_analysis(self, n_div=10, strain_mag=0.001, element_type='SOLID185'):
+    def run_full_analysis(self, ele_size=0.05, strain_mag=0.001, element_type='SOLID185', n_div=None):
         """
         Run complete analysis to get all effective properties.
 
         Parameters
         ----------
-        n_div : int
-            Number of mesh divisions
+        ele_size : float
+            Element size in mm (default: 0.05)
         strain_mag : float
             Strain magnitude for mechanical load cases
         element_type : str
             Element type: 'SOLID185' (8-node hex) or 'SOLID187' (10-node tet)
+        n_div : int, optional
+            Number of mesh divisions (overrides ele_size for SOLID185)
 
         Returns
         -------
@@ -903,7 +913,7 @@ class AdvancedCompositeCalculator:
             All effective properties
         """
         # Build model
-        self.build_model(n_div, element_type)
+        self.build_model(ele_size, n_div, element_type)
 
         # Compute stiffness matrix
         self.compute_stiffness_matrix(strain_mag)
@@ -1000,7 +1010,7 @@ def main():
         calc.launch(run_location='/tmp/mapdl_adv', override=True)
 
         # Run full analysis with hex mesh
-        calc.run_full_analysis(n_div=10, strain_mag=0.001)
+        calc.run_full_analysis(ele_size=0.05, strain_mag=0.001)
 
         # Print results
         calc.print_results()

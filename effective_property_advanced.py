@@ -109,14 +109,17 @@ class AdvancedCompositeCalculator:
             self.mapdl.exit()
             self.mapdl = None
 
-    def build_model(self, n_div=10, element_type='SOLID185'):
+    def build_model(self, ele_size=0.05, n_div=None, element_type='SOLID185'):
         """
         Build the RVE model with mapped hex mesh.
 
         Parameters
         ----------
-        n_div : int
-            Number of element divisions along each edge
+        ele_size : float
+            Element size in mm (default: 0.05)
+        n_div : int, optional
+            Number of element divisions along each edge. If provided, overrides ele_size
+            for line sizing (SOLID185 only).
         element_type : str
             Element type: 'SOLID185' (8-node hex) or 'SOLID187' (10-node tet)
         """
@@ -183,13 +186,18 @@ class AdvancedCompositeCalculator:
             m.mshkey(1)  # Mapped meshing for hex elements
             m.mshape(0, '3D')  # Hex elements
 
+        # Set element size
+        m.esize(ele_size)
+
         # Create, assign material, and mesh each volume
         for i, (xs, xe, ys, ye, mat_id) in enumerate(regions):
             m.block(xs, xe, ys, ye, 0, L)
             vol_num = i + 1
-            m.lsel('S', 'VOLU', '', vol_num)
-            m.lesize('ALL', '', '', n_div)
             m.vsel('S', 'VOLU', '', vol_num)
+            # Use n_div for line sizing if provided (SOLID185 only)
+            if n_div is not None and element_type == 'SOLID185':
+                m.lsel('S', 'VOLU', '', vol_num)
+                m.lesize('ALL', '', '', n_div)
             m.vatt(mat_id, '', 1)
             m.vmesh(vol_num)
 
@@ -374,44 +382,48 @@ class AdvancedCompositeCalculator:
     def _apply_uniform_displacement_bc(self, eps_x=0.0, eps_y=0.0, eps_z=0.0,
                                         gamma_xy=0.0, gamma_yz=0.0, gamma_xz=0.0):
         """
-        Apply Uniform Displacement BC (KUBC) for SOLID187 free mesh.
+        Apply Kinematic Uniform Boundary Conditions (KUBC) for SOLID187 free mesh.
 
-        This is used when node pairing is not available due to free meshing.
+        Based on ANSYS 2025 R1 Theory Documentation (Equations 3.24-3.27).
+
+        The linear displacement field that satisfies periodic BC (Eq 3.24-3.26):
+            u_x(x,y,z) = ε_x * x
+            u_y(x,y,z) = γ_xy * x + ε_y * y
+            u_z(x,y,z) = γ_xz * x + γ_yz * y + ε_z * z
+
+        Rigid body constraints (Eq 3.27) are satisfied at nodes with x=0, y=0, z=0.
         """
         m = self.mapdl
-        Lx, Ly, Lz = self.Lx, self.Ly, self.Lz
 
         self._clear_all_constraints()
 
-        # X- face: fix UX=0
-        m.cmsel('S', 'XNEG')
-        m.d('ALL', 'UX', 0)
+        m.allsel()
+        all_nodes = m.mesh.nodes  # shape (n_nodes, 3): [x, y, z]
+        all_nnum = m.mesh.nnum    # node numbers
 
-        # X+ face: UX = eps_x * Lx, UY = gamma_xy * Lx, UZ = gamma_xz * Lx
-        m.cmsel('S', 'XPOS')
-        m.d('ALL', 'UX', eps_x * Lx)
-        if gamma_xy != 0:
-            m.d('ALL', 'UY', gamma_xy * Lx)
-        if gamma_xz != 0:
-            m.d('ALL', 'UZ', gamma_xz * Lx)
+        # Get boundary node numbers from all 6 faces
+        boundary_nodes = set()
+        for face_name in ['XNEG', 'XPOS', 'YNEG', 'YPOS', 'ZNEG', 'ZPOS']:
+            boundary_nodes.update(self.face_nodes[face_name])
 
-        # Y- face: fix UY=0
-        m.cmsel('S', 'YNEG')
-        m.d('ALL', 'UY', 0)
+        # Create node number to index mapping
+        nnum_to_idx = {n: i for i, n in enumerate(all_nnum)}
 
-        # Y+ face: UY = eps_y * Ly, UZ = gamma_yz * Ly
-        m.cmsel('S', 'YPOS')
-        m.d('ALL', 'UY', eps_y * Ly)
-        if gamma_yz != 0:
-            m.d('ALL', 'UZ', gamma_yz * Ly)
+        # Apply linear displacement field to all boundary nodes (Eq 3.24-3.26)
+        # u_x = eps_x * x
+        # u_y = gamma_xy * x + eps_y * y
+        # u_z = gamma_xz * x + gamma_yz * y + eps_z * z
+        for node_num in boundary_nodes:
+            idx = nnum_to_idx[node_num]
+            x, y, z = all_nodes[idx]
 
-        # Z- face: fix UZ=0
-        m.cmsel('S', 'ZNEG')
-        m.d('ALL', 'UZ', 0)
+            ux = eps_x * x
+            uy = gamma_xy * x + eps_y * y
+            uz = gamma_xz * x + gamma_yz * y + eps_z * z
 
-        # Z+ face: UZ = eps_z * Lz
-        m.cmsel('S', 'ZPOS')
-        m.d('ALL', 'UZ', eps_z * Lz)
+            m.d(int(node_num), 'UX', ux)
+            m.d(int(node_num), 'UY', uy)
+            m.d(int(node_num), 'UZ', uz)
 
         m.allsel()
 
@@ -880,18 +892,20 @@ class AdvancedCompositeCalculator:
 
         return {'alpha_x': alpha_x, 'alpha_y': alpha_y, 'alpha_z': alpha_z}
 
-    def run_full_analysis(self, n_div=10, strain_mag=0.001, element_type='SOLID185'):
+    def run_full_analysis(self, ele_size=0.05, strain_mag=0.001, element_type='SOLID185', n_div=None):
         """
         Run complete analysis to get all effective properties.
 
         Parameters
         ----------
-        n_div : int
-            Number of mesh divisions
+        ele_size : float
+            Element size in mm (default: 0.05)
         strain_mag : float
             Strain magnitude for mechanical load cases
         element_type : str
             Element type: 'SOLID185' (8-node hex) or 'SOLID187' (10-node tet)
+        n_div : int, optional
+            Number of mesh divisions (overrides ele_size for SOLID185)
 
         Returns
         -------
@@ -899,7 +913,7 @@ class AdvancedCompositeCalculator:
             All effective properties
         """
         # Build model
-        self.build_model(n_div, element_type)
+        self.build_model(ele_size, n_div, element_type)
 
         # Compute stiffness matrix
         self.compute_stiffness_matrix(strain_mag)
@@ -996,7 +1010,7 @@ def main():
         calc.launch(run_location='/tmp/mapdl_adv', override=True)
 
         # Run full analysis with hex mesh
-        calc.run_full_analysis(n_div=10, strain_mag=0.001)
+        calc.run_full_analysis(ele_size=0.05, strain_mag=0.001)
 
         # Print results
         calc.print_results()

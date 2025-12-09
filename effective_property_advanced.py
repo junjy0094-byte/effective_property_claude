@@ -108,7 +108,7 @@ class AdvancedCompositeCalculator:
             self.mapdl.exit()
             self.mapdl = None
 
-    def build_model(self, n_div=10):
+    def build_model(self, n_div=10, element_type='SOLID185'):
         """
         Build the RVE model with mapped hex mesh.
 
@@ -116,6 +116,8 @@ class AdvancedCompositeCalculator:
         ----------
         n_div : int
             Number of element divisions along each edge
+        element_type : str
+            Element type: 'SOLID185' (8-node hex) or 'SOLID187' (10-node tet)
         """
         m = self.mapdl
         L = self.L
@@ -144,8 +146,9 @@ class AdvancedCompositeCalculator:
         m.mp('NUXY', 2, fp['nu'])
         m.mp('ALPX', 2, fp['alpha'])
 
-        # Element type: SOLID185 (8-node hex)
-        m.et(1, 'SOLID185')
+        # Element type: SOLID185 (8-node hex) or SOLID187 (10-node tet)
+        m.et(1, element_type)
+        print(f"Element type: {element_type}")
 
         # Create geometry using keypoints and volumes for mapped meshing
         # The RVE is divided into 9 volumes (3x3 in XY plane, extruded in Z)
@@ -380,46 +383,46 @@ class AdvancedCompositeCalculator:
         # u_pos - u_neg = offset
         # CE format: CE,NEQN,CONST, NODE1,Lab1,C1, NODE2,Lab2,C2, ...
         # CONST + C1*NODE1.Lab1 + C2*NODE2.Lab2 = 0
-        # For u_pos - u_neg = offset:  -offset + 1*u_pos + (-1)*u_neg = 0
+        # For u_neg - u_pos = -offset:  offset + 1*u_neg + (-1)*u_pos = 0
         for (n_neg, n_pos) in self.node_pairs['X']:
             # UX: u_x(L_x) - u_x(0) = eps_x * L_x
-            m.ce(ce_num, -eps_x * Lx, n_pos, 'UX', 1, n_neg, 'UX', -1)
+            m.ce(ce_num, eps_x * Lx, n_neg, 'UX', 1, n_pos, 'UX', -1)
             ce_num += 1
 
             # UY: u_y(L_x) - u_y(0) = gamma_xy * L_x
-            m.ce(ce_num, -gamma_xy * Lx, n_pos, 'UY', 1, n_neg, 'UY', -1)
+            m.ce(ce_num, gamma_xy * Lx, n_neg, 'UY', 1, n_pos, 'UY', -1)
             ce_num += 1
 
             # UZ: u_z(L_x) - u_z(0) = gamma_xz * L_x
-            m.ce(ce_num, -gamma_xz * Lx, n_pos, 'UZ', 1, n_neg, 'UZ', -1)
+            m.ce(ce_num, gamma_xz * Lx, n_neg, 'UZ', 1, n_pos, 'UZ', -1)
             ce_num += 1
 
         # Y-direction periodic BC (Equation 3.25)
         for (n_neg, n_pos) in self.node_pairs['Y']:
             # UX: u_x(L_y) - u_x(0) = 0
-            m.ce(ce_num, 0, n_pos, 'UX', 1, n_neg, 'UX', -1)
+            m.ce(ce_num, 0, n_neg, 'UX', 1, n_pos, 'UX', -1)
             ce_num += 1
 
             # UY: u_y(L_y) - u_y(0) = eps_y * L_y
-            m.ce(ce_num, -eps_y * Ly, n_pos, 'UY', 1, n_neg, 'UY', -1)
+            m.ce(ce_num, eps_y * Ly, n_neg, 'UY', 1, n_pos, 'UY', -1)
             ce_num += 1
 
             # UZ: u_z(L_y) - u_z(0) = gamma_yz * L_y
-            m.ce(ce_num, -gamma_yz * Ly, n_pos, 'UZ', 1, n_neg, 'UZ', -1)
+            m.ce(ce_num, gamma_yz * Ly, n_neg, 'UZ', 1, n_pos, 'UZ', -1)
             ce_num += 1
 
         # Z-direction periodic BC (Equation 3.26)
         for (n_neg, n_pos) in self.node_pairs['Z']:
             # UX: u_x(L_z) - u_x(0) = 0
-            m.ce(ce_num, 0, n_pos, 'UX', 1, n_neg, 'UX', -1)
+            m.ce(ce_num, 0, n_neg, 'UX', 1, n_pos, 'UX', -1)
             ce_num += 1
 
             # UY: u_y(L_z) - u_y(0) = 0
-            m.ce(ce_num, 0, n_pos, 'UY', 1, n_neg, 'UY', -1)
+            m.ce(ce_num, 0, n_neg, 'UY', 1, n_pos, 'UY', -1)
             ce_num += 1
 
             # UZ: u_z(L_z) - u_z(0) = eps_z * L_z
-            m.ce(ce_num, -eps_z * Lz, n_pos, 'UZ', 1, n_neg, 'UZ', -1)
+            m.ce(ce_num, eps_z * Lz, n_neg, 'UZ', 1, n_pos, 'UZ', -1)
             ce_num += 1
 
         # Rigid body constraints (Equation 3.27)
@@ -811,7 +814,7 @@ class AdvancedCompositeCalculator:
 
         return {'alpha_x': alpha_x, 'alpha_y': alpha_y, 'alpha_z': alpha_z}
 
-    def run_full_analysis(self, n_div=10, strain_mag=0.001):
+    def run_full_analysis(self, n_div=10, strain_mag=0.001, element_type='SOLID185'):
         """
         Run complete analysis to get all effective properties.
 
@@ -821,6 +824,8 @@ class AdvancedCompositeCalculator:
             Number of mesh divisions
         strain_mag : float
             Strain magnitude for mechanical load cases
+        element_type : str
+            Element type: 'SOLID185' (8-node hex) or 'SOLID187' (10-node tet)
 
         Returns
         -------
@@ -828,7 +833,7 @@ class AdvancedCompositeCalculator:
             All effective properties
         """
         # Build model
-        self.build_model(n_div)
+        self.build_model(n_div, element_type)
 
         # Compute stiffness matrix
         self.compute_stiffness_matrix(strain_mag)

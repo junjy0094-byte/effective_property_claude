@@ -173,9 +173,13 @@ class AdvancedCompositeCalculator:
             (x2, L, y2, L, 1),      # Top-right corner (matrix)
         ]
 
-        # Mesh settings
-        m.mshkey(1)  # Mapped meshing
-        m.mshape(0, '3D')  # Hex elements
+        # Mesh settings based on element type
+        if element_type == 'SOLID187':
+            m.mshkey(0)  # Free meshing for tet elements
+            m.mshape(1, '3D')  # Tet elements
+        else:
+            m.mshkey(1)  # Mapped meshing for hex elements
+            m.mshape(0, '3D')  # Hex elements
 
         # Create, assign material, and mesh each volume
         for i, (xs, xe, ys, ye, mat_id) in enumerate(regions):

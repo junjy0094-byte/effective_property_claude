@@ -90,10 +90,13 @@ def run_all_cases():
             )
 
             # 전체 해석 실행
+            result_prefix = f"case{i+1}_" if SAVE_RESULT_FILES else ''
             props = calc.run_full_analysis(
                 ele_size=ele_size,
                 strain_mag=strain_mag,
-                element_type=element_type
+                element_type=element_type,
+                save_results=SAVE_RESULT_FILES,
+                result_prefix=result_prefix
             )
 
             # 결과 출력
@@ -143,9 +146,6 @@ def run_all_cases():
             results.append(result)
 
         finally:
-            # 해석 파일 삭제 (저장하지 않는 경우)
-            if not SAVE_RESULT_FILES and calc.mapdl:
-                cleanup_result_files(calc.mapdl.directory)
             calc.exit()
 
     # CSV 저장
@@ -159,17 +159,6 @@ def run_all_cases():
     print(f"{'='*70}")
 
     return results
-
-
-def cleanup_result_files(work_dir):
-    """해석 결과 파일(.rst) 삭제"""
-    import os
-    import glob
-    for filepath in glob.glob(os.path.join(work_dir, '*.rst')):
-        try:
-            os.remove(filepath)
-        except OSError:
-            pass
 
 
 def save_results_to_csv(results):

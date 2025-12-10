@@ -691,7 +691,7 @@ class AdvancedCompositeCalculator:
         m.finish()
         return stress
 
-    def compute_stiffness_matrix(self, strain_mag=0.001):
+    def compute_stiffness_matrix(self, strain_mag=0.001, save_results=True, result_prefix=''):
         """
         Compute the complete 6x6 stiffness matrix [D] using Periodic BC.
 
@@ -705,6 +705,10 @@ class AdvancedCompositeCalculator:
         ----------
         strain_mag : float
             Magnitude of applied strain for each load case (default: 0.001)
+        save_results : bool
+            Whether to save .rst result files (default: True)
+        result_prefix : str
+            Prefix for result file names (default: '')
 
         Returns
         -------
@@ -715,7 +719,8 @@ class AdvancedCompositeCalculator:
         print("COMPUTING STIFFNESS MATRIX [D] (Periodic BC)")
         print(f"{'='*60}")
         print(f"Applied strain magnitude: {strain_mag}")
-        print(f"Result files will be saved in: {self.mapdl.directory}")
+        if save_results:
+            print(f"Result files will be saved in: {self.mapdl.directory}")
 
         D = np.zeros((6, 6))
 
@@ -735,7 +740,8 @@ class AdvancedCompositeCalculator:
 
             self.mapdl.prep7()
             bc_func(strain_mag)
-            self.solve(jobname=jobname)
+            job = f"{result_prefix}{jobname}" if save_results else None
+            self.solve(jobname=job)
 
             # Get volume-averaged stress (Equation 3.17)
             stress = self.get_volume_avg_stress()
@@ -830,7 +836,7 @@ class AdvancedCompositeCalculator:
 
         return self.effective_props
 
-    def compute_thermal_expansion(self, delta_T=1.0):
+    def compute_thermal_expansion(self, delta_T=1.0, save_results=True, result_prefix=''):
         """
         Compute effective secant thermal expansion coefficients.
 
@@ -852,6 +858,10 @@ class AdvancedCompositeCalculator:
         ----------
         delta_T : float
             Temperature change (default: 1.0°C)
+        save_results : bool
+            Whether to save .rst result files (default: True)
+        result_prefix : str
+            Prefix for result file names (default: '')
 
         Returns
         -------
@@ -873,7 +883,8 @@ class AdvancedCompositeCalculator:
         # Apply LC7: Thermal load with vanishing macroscopic strain
         self.mapdl.prep7()
         self.apply_bc_load_case_7_thermal(delta_T)
-        self.solve(jobname='LC7_thermal')
+        job = f"{result_prefix}LC7_thermal" if save_results else None
+        self.solve(jobname=job)
 
         # Get volume-averaged stress from thermal load case
         stress = self.get_volume_avg_stress()
@@ -904,7 +915,8 @@ class AdvancedCompositeCalculator:
 
         return {'alpha_x': alpha_x, 'alpha_y': alpha_y, 'alpha_z': alpha_z}
 
-    def run_full_analysis(self, ele_size=0.05, strain_mag=0.001, element_type='SOLID185', n_div=None):
+    def run_full_analysis(self, ele_size=0.05, strain_mag=0.001, element_type='SOLID185', n_div=None,
+                          save_results=True, result_prefix=''):
         """
         Run complete analysis to get all effective properties.
 
@@ -918,6 +930,10 @@ class AdvancedCompositeCalculator:
             Element type: 'SOLID185' (8-node hex) or 'SOLID187' (10-node tet)
         n_div : int, optional
             Number of mesh divisions (overrides ele_size for SOLID185)
+        save_results : bool
+            Whether to save .rst result files (default: True)
+        result_prefix : str
+            Prefix for result file names (default: '')
 
         Returns
         -------
@@ -928,13 +944,13 @@ class AdvancedCompositeCalculator:
         self.build_model(ele_size, n_div, element_type)
 
         # Compute stiffness matrix
-        self.compute_stiffness_matrix(strain_mag)
+        self.compute_stiffness_matrix(strain_mag, save_results, result_prefix)
 
         # Extract engineering constants
         self.compute_engineering_constants()
 
         # Compute thermal properties
-        self.compute_thermal_expansion()
+        self.compute_thermal_expansion(save_results=save_results, result_prefix=result_prefix)
 
         return self.effective_props
 

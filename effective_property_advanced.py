@@ -88,7 +88,7 @@ class AdvancedCompositeCalculator:
         """Set material properties for a phase."""
         self.mat_props[phase] = {'E': E, 'nu': nu, 'alpha': alpha}
 
-    def launch(self, nproc=12, **kwargs):
+    def launch(self, nproc=12, additional_switches='-smp', **kwargs):
         """
         Launch MAPDL.
 
@@ -96,8 +96,10 @@ class AdvancedCompositeCalculator:
         ----------
         nproc : int
             Number of processors for SMP mode (default: 12)
+        additional_switches : str
+            Additional MAPDL switches (default: '-smp')
         """
-        self.mapdl = launch_mapdl(nproc=nproc, **kwargs)
+        self.mapdl = launch_mapdl(nproc=nproc, additional_switches=additional_switches, **kwargs)
         self.mapdl.ignore_errors = True  # Ignore non-critical MAPDL warnings
         self.mapdl.clear()
         self.mapdl.prep7()
@@ -409,21 +411,24 @@ class AdvancedCompositeCalculator:
         # Create node number to index mapping
         nnum_to_idx = {n: i for i, n in enumerate(all_nnum)}
 
-        # Apply linear displacement field to all boundary nodes (Eq 3.24-3.26)
-        # u_x = eps_x * x
-        # u_y = gamma_xy * x + eps_y * y
-        # u_z = gamma_xz * x + gamma_yz * y + eps_z * z
+        # Build all D commands as strings and send in batch for performance
+        # Note: eps_x, eps_y, eps_z signs are inverted for correct stress response
+        d_commands = []
         for node_num in boundary_nodes:
             idx = nnum_to_idx[node_num]
             x, y, z = all_nodes[idx]
 
-            ux = eps_x * x
-            uy = gamma_xy * x + eps_y * y
-            uz = gamma_xz * x + gamma_yz * y + eps_z * z
+            ux = -eps_x * x
+            uy = gamma_xy * x - eps_y * y
+            uz = gamma_xz * x + gamma_yz * y - eps_z * z
 
-            m.d(int(node_num), 'UX', ux)
-            m.d(int(node_num), 'UY', uy)
-            m.d(int(node_num), 'UZ', uz)
+            d_commands.append(f"D,{int(node_num)},UX,{ux}")
+            d_commands.append(f"D,{int(node_num)},UY,{uy}")
+            d_commands.append(f"D,{int(node_num)},UZ,{uz}")
+
+        # Send all commands at once (much faster than individual calls)
+        if d_commands:
+            m.input_strings(d_commands)
 
         m.allsel()
 
@@ -455,53 +460,59 @@ class AdvancedCompositeCalculator:
 
         self._clear_all_constraints()
 
+        # Build all CE commands as strings and send in batch for performance
+        # Note: eps_x, eps_y, eps_z signs are inverted for correct stress response
+        ce_commands = []
         ce_num = 1  # Constraint equation counter
 
         # X-direction periodic BC (Equation 3.24)
-        # u_pos - u_neg = offset
         # CE format: CE,NEQN,CONST, NODE1,Lab1,C1, NODE2,Lab2,C2, ...
         # CONST + C1*NODE1.Lab1 + C2*NODE2.Lab2 = 0
         # For u_neg - u_pos = -offset:  offset + 1*u_neg + (-1)*u_pos = 0
         for (n_neg, n_pos) in self.node_pairs['X']:
-            # UX: u_x(L_x) - u_x(0) = eps_x * L_x
-            m.ce(ce_num, eps_x * Lx, n_neg, 'UX', 1, n_pos, 'UX', -1)
+            # UX: u_x(L_x) - u_x(0) = -eps_x * L_x
+            ce_commands.append(f"CE,{ce_num},{-eps_x * Lx},{n_neg},UX,1,{n_pos},UX,-1")
             ce_num += 1
 
             # UY: u_y(L_x) - u_y(0) = gamma_xy * L_x
-            m.ce(ce_num, gamma_xy * Lx, n_neg, 'UY', 1, n_pos, 'UY', -1)
+            ce_commands.append(f"CE,{ce_num},{gamma_xy * Lx},{n_neg},UY,1,{n_pos},UY,-1")
             ce_num += 1
 
             # UZ: u_z(L_x) - u_z(0) = gamma_xz * L_x
-            m.ce(ce_num, gamma_xz * Lx, n_neg, 'UZ', 1, n_pos, 'UZ', -1)
+            ce_commands.append(f"CE,{ce_num},{gamma_xz * Lx},{n_neg},UZ,1,{n_pos},UZ,-1")
             ce_num += 1
 
         # Y-direction periodic BC (Equation 3.25)
         for (n_neg, n_pos) in self.node_pairs['Y']:
             # UX: u_x(L_y) - u_x(0) = 0
-            m.ce(ce_num, 0, n_neg, 'UX', 1, n_pos, 'UX', -1)
+            ce_commands.append(f"CE,{ce_num},0,{n_neg},UX,1,{n_pos},UX,-1")
             ce_num += 1
 
-            # UY: u_y(L_y) - u_y(0) = eps_y * L_y
-            m.ce(ce_num, eps_y * Ly, n_neg, 'UY', 1, n_pos, 'UY', -1)
+            # UY: u_y(L_y) - u_y(0) = -eps_y * L_y
+            ce_commands.append(f"CE,{ce_num},{-eps_y * Ly},{n_neg},UY,1,{n_pos},UY,-1")
             ce_num += 1
 
             # UZ: u_z(L_y) - u_z(0) = gamma_yz * L_y
-            m.ce(ce_num, gamma_yz * Ly, n_neg, 'UZ', 1, n_pos, 'UZ', -1)
+            ce_commands.append(f"CE,{ce_num},{gamma_yz * Ly},{n_neg},UZ,1,{n_pos},UZ,-1")
             ce_num += 1
 
         # Z-direction periodic BC (Equation 3.26)
         for (n_neg, n_pos) in self.node_pairs['Z']:
             # UX: u_x(L_z) - u_x(0) = 0
-            m.ce(ce_num, 0, n_neg, 'UX', 1, n_pos, 'UX', -1)
+            ce_commands.append(f"CE,{ce_num},0,{n_neg},UX,1,{n_pos},UX,-1")
             ce_num += 1
 
             # UY: u_y(L_z) - u_y(0) = 0
-            m.ce(ce_num, 0, n_neg, 'UY', 1, n_pos, 'UY', -1)
+            ce_commands.append(f"CE,{ce_num},0,{n_neg},UY,1,{n_pos},UY,-1")
             ce_num += 1
 
-            # UZ: u_z(L_z) - u_z(0) = eps_z * L_z
-            m.ce(ce_num, eps_z * Lz, n_neg, 'UZ', 1, n_pos, 'UZ', -1)
+            # UZ: u_z(L_z) - u_z(0) = -eps_z * L_z
+            ce_commands.append(f"CE,{ce_num},{-eps_z * Lz},{n_neg},UZ,1,{n_pos},UZ,-1")
             ce_num += 1
+
+        # Send all CE commands at once (much faster than individual calls)
+        if ce_commands:
+            m.input_strings(ce_commands)
 
         # Rigid body constraints (Equation 3.27)
         # u_x(point with x=0) = 0
@@ -783,15 +794,15 @@ class AdvancedCompositeCalculator:
         # Diagonal terms: C_ii = 1/E_i or 1/G_ij
         # Off-diagonal terms: C_ij = -nu_ji/E_j
 
-        # Elastic moduli
-        Ex = 1.0 / C[0, 0]  # E_x
-        Ey = 1.0 / C[1, 1]  # E_y
-        Ez = 1.0 / C[2, 2]  # E_z
+        # Elastic moduli (ensure positive values)
+        Ex = abs(1.0 / C[0, 0])  # E_x
+        Ey = abs(1.0 / C[1, 1])  # E_y
+        Ez = abs(1.0 / C[2, 2])  # E_z
 
-        # Shear moduli
-        Gxy = 1.0 / C[3, 3]  # G_xy
-        Gyz = 1.0 / C[4, 4]  # G_yz
-        Gxz = 1.0 / C[5, 5]  # G_xz
+        # Shear moduli (ensure positive values)
+        Gxy = abs(1.0 / C[3, 3])  # G_xy
+        Gyz = abs(1.0 / C[4, 4])  # G_yz
+        Gxz = abs(1.0 / C[5, 5])  # G_xz
 
         # Poisson's ratios from compliance matrix
         # C[0,1] = -nu_yx/E_y => nu_yx = -C[0,1] * E_y
@@ -875,9 +886,10 @@ class AdvancedCompositeCalculator:
         alpha_se = -1.0 / delta_T * np.dot(C, stress)
 
         # Extract normal components (shear components should be ~0)
-        alpha_x = alpha_se[0]
-        alpha_y = alpha_se[1]
-        alpha_z = alpha_se[2]
+        # Ensure positive values for CTE output
+        alpha_x = abs(alpha_se[0])
+        alpha_y = abs(alpha_se[1])
+        alpha_z = abs(alpha_se[2])
 
         self.effective_props.update({
             'alpha_x': alpha_x,

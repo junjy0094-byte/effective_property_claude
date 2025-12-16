@@ -418,9 +418,9 @@ class AdvancedCompositeCalculator:
             idx = nnum_to_idx[node_num]
             x, y, z = all_nodes[idx]
 
-            ux = -eps_x * x
-            uy = gamma_xy * x - eps_y * y
-            uz = gamma_xz * x + gamma_yz * y - eps_z * z
+            ux = eps_x * x
+            uy = gamma_xy * x + eps_y * y
+            uz = gamma_xz * x + gamma_yz * y + eps_z * z
 
             d_commands.append(f"D,{int(node_num)},UX,{ux}")
             d_commands.append(f"D,{int(node_num)},UY,{uy}")
@@ -638,9 +638,22 @@ class AdvancedCompositeCalculator:
                 except OSError:
                     pass  # Ignore errors if file is in use or already deleted
 
-    def get_volume_avg_stress(self):
+    def get_stress_from_reaction_forces(self):
         """
-        Calculate volume-averaged stress over the RVE.
+        Calculate stress from reaction forces on RVE boundary faces.
+
+        The macroscopic stress is computed from the total reaction forces
+        on the boundary faces divided by the corresponding face areas.
+
+        For normal stresses:
+            σ_x = F_x(XPOS) / A_yz  where A_yz = Ly × Lz
+            σ_y = F_y(YPOS) / A_xz  where A_xz = Lx × Lz
+            σ_z = F_z(ZPOS) / A_xy  where A_xy = Lx × Ly
+
+        For shear stresses (averaged from both contributing faces):
+            τ_xy = (F_y(XPOS)/A_yz + F_x(YPOS)/A_xz) / 2
+            τ_yz = (F_z(YPOS)/A_xz + F_y(ZPOS)/A_xy) / 2
+            τ_xz = (F_z(XPOS)/A_yz + F_x(ZPOS)/A_xy) / 2
 
         Returns
         -------
@@ -648,47 +661,53 @@ class AdvancedCompositeCalculator:
             Stress tensor in Voigt notation [S11, S22, S33, S12, S23, S31]
         """
         m = self.mapdl
+        Lx, Ly, Lz = self.Lx, self.Ly, self.Lz
+
+        # Face areas
+        A_yz = Ly * Lz  # XPOS/XNEG face area
+        A_xz = Lx * Lz  # YPOS/YNEG face area
+        A_xy = Lx * Ly  # ZPOS/ZNEG face area
+
         m.post1()
         m.set('LAST')
 
-        m.esel('ALL')
+        # Get reaction forces on XPOS face
+        m.cmsel('S', 'XPOS')
+        m.fsum()
+        fx_xpos = m.get_value('FSUM', 0, 'ITEM', 'FX')
+        fy_xpos = m.get_value('FSUM', 0, 'ITEM', 'FY')
+        fz_xpos = m.get_value('FSUM', 0, 'ITEM', 'FZ')
 
-        # Create element tables for stresses
-        m.etable('SXX', 'S', 'X')
-        m.etable('SYY', 'S', 'Y')
-        m.etable('SZZ', 'S', 'Z')
-        m.etable('SXY', 'S', 'XY')
-        m.etable('SYZ', 'S', 'YZ')
-        m.etable('SXZ', 'S', 'XZ')
+        # Get reaction forces on YPOS face
+        m.cmsel('S', 'YPOS')
+        m.fsum()
+        fx_ypos = m.get_value('FSUM', 0, 'ITEM', 'FX')
+        fy_ypos = m.get_value('FSUM', 0, 'ITEM', 'FY')
+        fz_ypos = m.get_value('FSUM', 0, 'ITEM', 'FZ')
 
-        # Get element volumes for proper averaging
-        m.etable('EVOL', 'VOLU')
+        # Get reaction forces on ZPOS face
+        m.cmsel('S', 'ZPOS')
+        m.fsum()
+        fx_zpos = m.get_value('FSUM', 0, 'ITEM', 'FX')
+        fy_zpos = m.get_value('FSUM', 0, 'ITEM', 'FY')
+        fz_zpos = m.get_value('FSUM', 0, 'ITEM', 'FZ')
 
-        # Volume-weighted averaging
-        m.ssum()
-
-        total_vol = m.get_value('SSUM', '', 'ITEM', 'EVOL')
-
-        sxx_sum = m.get_value('SSUM', '', 'ITEM', 'SXX')
-        syy_sum = m.get_value('SSUM', '', 'ITEM', 'SYY')
-        szz_sum = m.get_value('SSUM', '', 'ITEM', 'SZZ')
-        sxy_sum = m.get_value('SSUM', '', 'ITEM', 'SXY')
-        syz_sum = m.get_value('SSUM', '', 'ITEM', 'SYZ')
-        sxz_sum = m.get_value('SSUM', '', 'ITEM', 'SXZ')
-
-        n_elem = m.mesh.n_elem
-
-        # Simple average (each element assumed equal volume for hex mesh)
-        stress = np.array([
-            sxx_sum / n_elem,
-            syy_sum / n_elem,
-            szz_sum / n_elem,
-            sxy_sum / n_elem,
-            syz_sum / n_elem,
-            sxz_sum / n_elem
-        ])
-
+        m.allsel()
         m.finish()
+
+        # Calculate stresses from reaction forces
+        # Normal stresses: Force normal to face / Face area
+        sigma_x = fx_xpos / A_yz
+        sigma_y = fy_ypos / A_xz
+        sigma_z = fz_zpos / A_xy
+
+        # Shear stresses: Average from both contributing faces for symmetry
+        tau_xy = (fy_xpos / A_yz + fx_ypos / A_xz) / 2.0
+        tau_yz = (fz_ypos / A_xz + fy_zpos / A_xy) / 2.0
+        tau_xz = (fz_xpos / A_yz + fx_zpos / A_xy) / 2.0
+
+        stress = np.array([sigma_x, sigma_y, sigma_z, tau_xy, tau_yz, tau_xz])
+
         return stress
 
     def compute_stiffness_matrix(self, strain_mag=0.001, save_results=True, result_prefix=''):
@@ -743,8 +762,8 @@ class AdvancedCompositeCalculator:
             job = f"{result_prefix}{jobname}" if save_results else None
             self.solve(jobname=job)
 
-            # Get volume-averaged stress (Equation 3.17)
-            stress = self.get_volume_avg_stress()
+            # Get stress from boundary reaction forces
+            stress = self.get_stress_from_reaction_forces()
 
             # D_ij = σ_i / ε_j where ε_j = strain_mag
             D[:, i] = stress / strain_mag
@@ -886,8 +905,8 @@ class AdvancedCompositeCalculator:
         job = f"{result_prefix}LC7_thermal" if save_results else None
         self.solve(jobname=job)
 
-        # Get volume-averaged stress from thermal load case
-        stress = self.get_volume_avg_stress()
+        # Get stress from boundary reaction forces for thermal load case
+        stress = self.get_stress_from_reaction_forces()
         print(f"    Thermal stress [MPa]: σ_x={stress[0]:.2f}, σ_y={stress[1]:.2f}, σ_z={stress[2]:.2f}")
         print(f"                          τ_xy={stress[3]:.2f}, τ_yz={stress[4]:.2f}, τ_xz={stress[5]:.2f}")
 

@@ -418,9 +418,9 @@ class AdvancedCompositeCalculator:
             idx = nnum_to_idx[node_num]
             x, y, z = all_nodes[idx]
 
-            ux = -eps_x * x
-            uy = gamma_xy * x - eps_y * y
-            uz = gamma_xz * x + gamma_yz * y - eps_z * z
+            ux = eps_x * x
+            uy = gamma_xy * x + eps_y * y
+            uz = gamma_xz * x + gamma_yz * y + eps_z * z
 
             d_commands.append(f"D,{int(node_num)},UX,{ux}")
             d_commands.append(f"D,{int(node_num)},UY,{uy}")

@@ -832,18 +832,18 @@ class AdvancedCompositeCalculator:
         # Poisson's ratios from compliance matrix
         # C[0,1] = -nu_yx/E_y => nu_yx = -C[0,1] * E_y
         # C[1,0] = -nu_xy/E_x => nu_xy = -C[1,0] * E_x
-        nu_xy = -C[1, 0] * Ex  # -ν_xy/E_x
-        nu_yx = -C[0, 1] * Ey  # -ν_yx/E_y
+        nu_xy = abs(-C[1, 0] * Ex)  # -ν_xy/E_x
+        nu_yx = abs(-C[0, 1] * Ey)  # -ν_yx/E_y
 
         # C[0,2] = -nu_zx/E_z => nu_zx = -C[0,2] * E_z
         # C[2,0] = -nu_xz/E_x => nu_xz = -C[2,0] * E_x
-        nu_xz = -C[2, 0] * Ex  # -ν_xz/E_x
-        nu_zx = -C[0, 2] * Ez  # -ν_zx/E_z
+        nu_xz = abs(-C[2, 0] * Ex)  # -ν_xz/E_x
+        nu_zx = abs(-C[0, 2] * Ez)  # -ν_zx/E_z
 
         # C[1,2] = -nu_zy/E_z => nu_zy = -C[1,2] * E_z
         # C[2,1] = -nu_yz/E_y => nu_yz = -C[2,1] * E_y
-        nu_yz = -C[2, 1] * Ey  # -ν_yz/E_y
-        nu_zy = -C[1, 2] * Ez  # -ν_zy/E_z
+        nu_yz = abs(-C[2, 1] * Ey)  # -ν_yz/E_y
+        nu_zy = abs(-C[1, 2] * Ez)  # -ν_zy/E_z
 
         self.effective_props.update({
             'Ex': Ex, 'Ey': Ey, 'Ez': Ez,

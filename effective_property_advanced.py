@@ -53,21 +53,29 @@ class AdvancedCompositeCalculator:
 
         Parameters
         ----------
-        rve_size : float
-            Size of the RVE cube in mm (L_x = L_y = L_z = L)
+        rve_size : float or tuple/list of 3 floats
+            Size of the RVE in mm.
+            - If float: L_x = L_y = L_z = rve_size (cube)
+            - If tuple/list: (L_x, L_y, L_z) for rectangular RVE
         fiber_vf : float
             Fiber volume fraction (0 to 1)
         """
-        self.L = rve_size
-        self.Lx = rve_size
-        self.Ly = rve_size
-        self.Lz = rve_size
-        self.Vf = fiber_vf
-        self.V = rve_size ** 3
+        # Handle rve_size as scalar or tuple/list
+        if isinstance(rve_size, (tuple, list)):
+            self.Lx, self.Ly, self.Lz = rve_size[0], rve_size[1], rve_size[2]
+            self.L = self.Lx  # For backward compatibility
+        else:
+            self.L = rve_size
+            self.Lx = rve_size
+            self.Ly = rve_size
+            self.Lz = rve_size
 
-        # Square fiber half-width from volume fraction
-        # Vf = (2*a)^2 / L^2 => a = L * sqrt(Vf) / 2
-        self.fiber_half_width = rve_size * np.sqrt(fiber_vf) / 2
+        self.Vf = fiber_vf
+        self.V = self.Lx * self.Ly * self.Lz
+
+        # Square fiber half-width from volume fraction (based on Lx, Ly cross-section)
+        # Vf = (2*a)^2 / (Lx * Ly) => a = sqrt(Vf * Lx * Ly) / 2
+        self.fiber_half_width = np.sqrt(fiber_vf * self.Lx * self.Ly) / 2
 
         # Material properties
         self.mat_props = {
@@ -85,9 +93,9 @@ class AdvancedCompositeCalculator:
         self.effective_props = {}
 
         # Mesh coordinate bounds (updated from actual mesh in _create_face_sets)
-        self.x_min, self.x_max = 0.0, rve_size
-        self.y_min, self.y_max = 0.0, rve_size
-        self.z_min, self.z_max = 0.0, rve_size
+        self.x_min, self.x_max = 0.0, self.Lx
+        self.y_min, self.y_max = 0.0, self.Ly
+        self.z_min, self.z_max = 0.0, self.Lz
 
     def set_material(self, phase, E, nu, alpha):
         """Set material properties for a phase."""

@@ -136,11 +136,14 @@ class AdvancedCompositeCalculator:
         if db_name.endswith('.db'):
             db_name = db_name[:-3]
 
+        # Select all entities before saving
+        m.allsel()
+
         # Finish any active processor before saving
         m.finish()
 
-        # Save the database
-        m.save(db_name)
+        # Save the database (includes geometry, mesh, materials, etc.)
+        m.save(db_name, 'ALL')
 
         saved_path = os.path.join(m.directory, f"{db_name}.db")
         print(f"Database saved: {saved_path}")
@@ -151,8 +154,9 @@ class AdvancedCompositeCalculator:
         """
         Resume MAPDL database from a saved file.
 
-        This loads the mesh and model from the saved database and
+        This loads the mesh, materials, and model from the saved database and
         recreates the face node sets and node pairs for periodic BC.
+        Note: Materials are already included in the database.
 
         Parameters
         ----------
@@ -198,33 +202,46 @@ class AdvancedCompositeCalculator:
         print(f"{'='*60}")
         print(f"Database: {db_name}.db")
 
-        # Resume the database
+        # Clear current database before resume
         m.finish()
-        m.resume(db_name)
+        m.clear()
+
+        # Resume the database
+        m.resume(db_name, 'ALL')
+
+        # Enter preprocessor
         m.prep7()
 
-        # Get mesh info
+        # Select all entities
         m.allsel()
+
+        # Get mesh info
         nn = int(m.get('NCOUNT', 'NODE', '', 'COUNT'))
         ne = int(m.get('ECOUNT', 'ELEM', '', 'COUNT'))
         print(f"Mesh loaded: {nn} nodes, {ne} elements")
 
+        if nn == 0 or ne == 0:
+            raise RuntimeError(f"Failed to load mesh from database. Nodes: {nn}, Elements: {ne}")
+
         # Detect element type from the mesh
         m.esel('S', 'TYPE', '', 1)
-        elem_type = m.get('ETYP', 'ELEM', 0, 'ETYP')
+        etype_num = int(m.get('ETYP', 'ELEM', 0, 'ATTR'))
         m.allsel()
 
-        # Set element type string for BC application
-        if elem_type == 187:
+        # Get element type name
+        if etype_num == 185:
+            self.element_type = 'SOLID185'
+        elif etype_num == 187:
             self.element_type = 'SOLID187'
         else:
-            self.element_type = 'SOLID185'
-        print(f"Element type detected: {self.element_type}")
+            # Try to detect from element definition
+            self.element_type = 'SOLID185'  # default
+        print(f"Element type: {self.element_type}")
 
         # Recreate face node sets and node pairs for periodic BC
         self._create_face_sets()
 
-        print("Database resumed successfully")
+        print("Database resumed successfully (materials already loaded from DB)")
         return True
 
     def run_analysis_from_db(self, db_path, strain_mag=0.001,

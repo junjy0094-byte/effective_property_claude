@@ -112,10 +112,11 @@ def run_all_cases():
 
         try:
             # MAPDL 실행
+            # Note: db_path 케이스에서는 override=False로 설정하여 기존 DB 파일 유지
             calc.launch(
                 nproc=12,
                 run_location='/tmp/mapdl_adv',
-                override=True,
+                override=not bool(db_path),  # DB resume 시에는 override=False
                 additional_switches='-smp'
             )
 

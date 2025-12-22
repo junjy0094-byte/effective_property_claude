@@ -385,19 +385,33 @@ class AdvancedCompositeCalculator:
     def _create_face_sets(self):
         """Create node sets for each face and create node pairs for periodic BC."""
         m = self.mapdl
-        L = self.L
         tol = 1e-6
 
         print("  Creating face node sets for Periodic BC...")
 
+        # Get actual node coordinate bounds from mesh
+        m.allsel()
+        all_nodes = m.mesh.nodes  # shape (n_nodes, 3): [x, y, z]
+
+        x_min, x_max = all_nodes[:, 0].min(), all_nodes[:, 0].max()
+        y_min, y_max = all_nodes[:, 1].min(), all_nodes[:, 1].max()
+        z_min, z_max = all_nodes[:, 2].min(), all_nodes[:, 2].max()
+
+        # Update RVE dimensions from actual mesh bounds
+        self.Lx = x_max - x_min
+        self.Ly = y_max - y_min
+        self.Lz = z_max - z_min
+
+        print(f"    Mesh bounds: X=[{x_min:.4f}, {x_max:.4f}], Y=[{y_min:.4f}, {y_max:.4f}], Z=[{z_min:.4f}, {z_max:.4f}]")
+
         # Create face component sets and store node lists
         faces = [
-            ('XNEG', 'X', 0),
-            ('XPOS', 'X', L),
-            ('YNEG', 'Y', 0),
-            ('YPOS', 'Y', L),
-            ('ZNEG', 'Z', 0),
-            ('ZPOS', 'Z', L),
+            ('XNEG', 'X', x_min),
+            ('XPOS', 'X', x_max),
+            ('YNEG', 'Y', y_min),
+            ('YPOS', 'Y', y_max),
+            ('ZNEG', 'Z', z_min),
+            ('ZPOS', 'Z', z_max),
         ]
 
         self.face_nodes = {}

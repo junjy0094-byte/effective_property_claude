@@ -207,7 +207,7 @@ class AdvancedCompositeCalculator:
         m.clear()
 
         # Resume the database
-        m.resume(db_name, 'ALL')
+        m.resume(db_name, 'DB')
 
         # Enter preprocessor
         m.prep7()
@@ -223,19 +223,13 @@ class AdvancedCompositeCalculator:
         if nn == 0 or ne == 0:
             raise RuntimeError(f"Failed to load mesh from database. Nodes: {nn}, Elements: {ne}")
 
-        # Detect element type from the mesh
-        m.esel('S', 'TYPE', '', 1)
-        etype_num = int(m.get('ETYP', 'ELEM', 0, 'ATTR'))
-        m.allsel()
-
-        # Get element type name
-        if etype_num == 185:
-            self.element_type = 'SOLID185'
-        elif etype_num == 187:
+        # Detect element type from element type definition
+        # Use ETLIST to get element type info
+        etlist_output = m.etlist()
+        if 'SOLID187' in etlist_output.upper():
             self.element_type = 'SOLID187'
         else:
-            # Try to detect from element definition
-            self.element_type = 'SOLID185'  # default
+            self.element_type = 'SOLID185'
         print(f"Element type: {self.element_type}")
 
         # Recreate face node sets and node pairs for periodic BC

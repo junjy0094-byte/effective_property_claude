@@ -803,12 +803,15 @@ class AdvancedCompositeCalculator:
         """Solve current load case and optionally save result file."""
         m = self.mapdl
 
+        # Always finish current processor before solving
+        m.finish()
+
         # Set jobname for this load case if provided
         if jobname:
-            m.finish()
             m.filname(jobname)
 
-        m.run('/SOLU')
+        # Enter solution processor
+        m.slashsolu()
         m.antype('STATIC')
         m.solve()
         m.finish()

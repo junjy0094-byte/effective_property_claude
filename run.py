@@ -40,9 +40,15 @@ REFERENCE = {
 # 해석 케이스 리스트: 각 케이스는 딕셔너리로 정의
 # 모든 키는 선택 키 (기본값: fiber_vf=0.1, ele_size=0.1, element_type='SOLID185')
 # 선택 키: rve_size (기본값 1.0), strain_mag (기본값 0.001)
+# DB 관련 키:
+#   - save_db: DB 저장 파일명 (모델 빌드 후 저장)
+#   - db_path: DB 불러오기 경로 (이 옵션 사용 시 모델 빌드 생략)
 CASES = [
-    # 기본 케이스 (모든 기본값 사용)
-    {},
+    # 기본 케이스 - 모델 빌드 후 DB 저장
+    {'save_db': 'rve_vf10_ele01'},
+
+    # DB에서 불러와서 해석 (모델 빌드 없이 바로 해석)
+    # {'db_path': '/tmp/mapdl_adv/rve_vf10_ele01.db'},
 
     # ele_size 변화
     {'ele_size': 0.04},
@@ -84,9 +90,17 @@ def run_all_cases():
         element_type = case.get('element_type', 'SOLID185')
         rve_size = case.get('rve_size', 1.0)
         strain_mag = case.get('strain_mag', 0.001)
+        db_path = case.get('db_path', None)  # DB 불러오기 경로
+        save_db = case.get('save_db', None)  # DB 저장 파일명
 
+        # 케이스 정보 출력
         print(f"\n{'#'*70}")
-        print(f"CASE {i+1}/{len(CASES)}: Vf={fiber_vf}, ele_size={ele_size}, {element_type}")
+        if db_path:
+            print(f"CASE {i+1}/{len(CASES)}: [DB RESUME] {db_path}")
+        else:
+            print(f"CASE {i+1}/{len(CASES)}: Vf={fiber_vf}, ele_size={ele_size}, {element_type}")
+            if save_db:
+                print(f"  -> DB will be saved as: {save_db}.db")
         print(f"{'#'*70}")
 
         case_start = time.time()
@@ -105,15 +119,26 @@ def run_all_cases():
                 additional_switches='-smp'
             )
 
-            # 전체 해석 실행
+            # DB resume 또는 새로 빌드
             result_prefix = f"case{i+1}_" if SAVE_RESULT_FILES else ''
-            props = calc.run_full_analysis(
-                ele_size=ele_size,
-                strain_mag=strain_mag,
-                element_type=element_type,
-                save_results=SAVE_RESULT_FILES,
-                result_prefix=result_prefix
-            )
+            if db_path:
+                # DB에서 불러와서 해석
+                props = calc.run_analysis_from_db(
+                    db_path=db_path,
+                    strain_mag=strain_mag,
+                    save_results=SAVE_RESULT_FILES,
+                    result_prefix=result_prefix
+                )
+            else:
+                # 새로 모델 빌드 후 해석
+                props = calc.run_full_analysis(
+                    ele_size=ele_size,
+                    strain_mag=strain_mag,
+                    element_type=element_type,
+                    save_results=SAVE_RESULT_FILES,
+                    result_prefix=result_prefix,
+                    save_db=save_db
+                )
 
             # 결과 출력
             calc.print_results()
@@ -128,6 +153,7 @@ def run_all_cases():
                 'rve_size': rve_size,
                 'ele_size': ele_size,
                 'element_type': element_type,
+                'db_path': db_path if db_path else '',
                 'Ex': props.get('Ex', ''),
                 'Ey': props.get('Ey', ''),
                 'Ez': props.get('Ez', ''),
@@ -167,6 +193,7 @@ def run_all_cases():
                 'rve_size': rve_size,
                 'ele_size': ele_size,
                 'element_type': element_type,
+                'db_path': db_path if db_path else '',
                 'time_sec': round(elapsed, 1),
                 'status': f'ERROR: {e}'
             }
@@ -197,7 +224,7 @@ def save_results_to_csv(results):
         return
 
     fieldnames = [
-        'case', 'fiber_vf', 'rve_size', 'ele_size', 'element_type',
+        'case', 'fiber_vf', 'rve_size', 'ele_size', 'element_type', 'db_path',
         'Ex', 'Ey', 'Ez', 'Gxy', 'Gyz', 'Gxz',
         'nu_xy', 'nu_yz', 'nu_xz',
         'alpha_x', 'alpha_y', 'alpha_z',

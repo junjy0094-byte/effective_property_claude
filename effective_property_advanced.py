@@ -111,6 +111,160 @@ class AdvancedCompositeCalculator:
             self.mapdl.exit()
             self.mapdl = None
 
+    def save_database(self, db_path):
+        """
+        Save MAPDL database to a file for later resume.
+
+        Parameters
+        ----------
+        db_path : str
+            Path to save the database file (without extension).
+            The .db file will be saved in MAPDL working directory.
+
+        Returns
+        -------
+        str
+            Full path to the saved database file.
+        """
+        if not self.mapdl:
+            raise RuntimeError("MAPDL not launched. Call launch() first.")
+
+        m = self.mapdl
+
+        # Extract just the filename from db_path
+        db_name = os.path.basename(db_path)
+        if db_name.endswith('.db'):
+            db_name = db_name[:-3]
+
+        # Finish any active processor before saving
+        m.finish()
+
+        # Save the database
+        m.save(db_name)
+
+        saved_path = os.path.join(m.directory, f"{db_name}.db")
+        print(f"Database saved: {saved_path}")
+
+        return saved_path
+
+    def resume_database(self, db_path):
+        """
+        Resume MAPDL database from a saved file.
+
+        This loads the mesh and model from the saved database and
+        recreates the face node sets and node pairs for periodic BC.
+
+        Parameters
+        ----------
+        db_path : str
+            Path to the database file. Can be:
+            - Full path: /path/to/model.db
+            - Filename only: model.db (looks in MAPDL working directory)
+
+        Returns
+        -------
+        bool
+            True if resume was successful.
+        """
+        if not self.mapdl:
+            raise RuntimeError("MAPDL not launched. Call launch() first.")
+
+        m = self.mapdl
+
+        # Handle db_path
+        if os.path.isabs(db_path):
+            # Full path provided - extract filename and copy to working dir if needed
+            db_dir = os.path.dirname(db_path)
+            db_name = os.path.basename(db_path)
+            if db_name.endswith('.db'):
+                db_name = db_name[:-3]
+
+            # If file is not in MAPDL working directory, we need to copy it
+            if db_dir != m.directory:
+                import shutil
+                src_file = db_path if db_path.endswith('.db') else db_path + '.db'
+                dst_file = os.path.join(m.directory, f"{db_name}.db")
+                if os.path.exists(src_file):
+                    shutil.copy2(src_file, dst_file)
+                    print(f"Copied database to MAPDL working directory: {dst_file}")
+        else:
+            # Relative path or filename
+            db_name = db_path
+            if db_name.endswith('.db'):
+                db_name = db_name[:-3]
+
+        print(f"\n{'='*60}")
+        print("RESUMING RVE MODEL FROM DATABASE")
+        print(f"{'='*60}")
+        print(f"Database: {db_name}.db")
+
+        # Resume the database
+        m.finish()
+        m.resume(db_name)
+        m.prep7()
+
+        # Get mesh info
+        m.allsel()
+        nn = int(m.get('NCOUNT', 'NODE', '', 'COUNT'))
+        ne = int(m.get('ECOUNT', 'ELEM', '', 'COUNT'))
+        print(f"Mesh loaded: {nn} nodes, {ne} elements")
+
+        # Detect element type from the mesh
+        m.esel('S', 'TYPE', '', 1)
+        elem_type = m.get('ETYP', 'ELEM', 0, 'ETYP')
+        m.allsel()
+
+        # Set element type string for BC application
+        if elem_type == 187:
+            self.element_type = 'SOLID187'
+        else:
+            self.element_type = 'SOLID185'
+        print(f"Element type detected: {self.element_type}")
+
+        # Recreate face node sets and node pairs for periodic BC
+        self._create_face_sets()
+
+        print("Database resumed successfully")
+        return True
+
+    def run_analysis_from_db(self, db_path, strain_mag=0.001,
+                              save_results=True, result_prefix=''):
+        """
+        Run effective property analysis from a resumed database.
+
+        This is useful when you have already created and saved the RVE model
+        and want to compute effective properties without rebuilding the mesh.
+
+        Parameters
+        ----------
+        db_path : str
+            Path to the database file.
+        strain_mag : float
+            Strain magnitude for mechanical load cases (default: 0.001)
+        save_results : bool
+            Whether to save .rst result files (default: True)
+        result_prefix : str
+            Prefix for result file names (default: '')
+
+        Returns
+        -------
+        props : dict
+            All effective properties
+        """
+        # Resume the database
+        self.resume_database(db_path)
+
+        # Compute stiffness matrix
+        self.compute_stiffness_matrix(strain_mag, save_results, result_prefix)
+
+        # Extract engineering constants
+        self.compute_engineering_constants()
+
+        # Compute thermal properties
+        self.compute_thermal_expansion(save_results=save_results, result_prefix=result_prefix)
+
+        return self.effective_props
+
     def build_model(self, ele_size=0.05, n_div=None, element_type='SOLID185'):
         """
         Build the RVE model with mapped hex mesh.
@@ -935,7 +1089,7 @@ class AdvancedCompositeCalculator:
         return {'alpha_x': alpha_x, 'alpha_y': alpha_y, 'alpha_z': alpha_z}
 
     def run_full_analysis(self, ele_size=0.05, strain_mag=0.001, element_type='SOLID185', n_div=None,
-                          save_results=True, result_prefix=''):
+                          save_results=True, result_prefix='', save_db=None):
         """
         Run complete analysis to get all effective properties.
 
@@ -953,6 +1107,9 @@ class AdvancedCompositeCalculator:
             Whether to save .rst result files (default: True)
         result_prefix : str
             Prefix for result file names (default: '')
+        save_db : str, optional
+            If provided, save the model database to this filename after building.
+            The database can be resumed later using run_analysis_from_db().
 
         Returns
         -------
@@ -961,6 +1118,10 @@ class AdvancedCompositeCalculator:
         """
         # Build model
         self.build_model(ele_size, n_div, element_type)
+
+        # Save database if requested
+        if save_db:
+            self.save_database(save_db)
 
         # Compute stiffness matrix
         self.compute_stiffness_matrix(strain_mag, save_results, result_prefix)

@@ -834,6 +834,7 @@ class AdvancedCompositeCalculator:
 
         The macroscopic stress is computed from the total reaction forces
         on the boundary faces divided by the corresponding face areas.
+        Face areas are calculated from actual mesh bounds (Lx, Ly, Lz).
 
         For normal stresses:
             σ_x = F_x(XPOS) / A_yz  where A_yz = Ly × Lz
@@ -851,9 +852,11 @@ class AdvancedCompositeCalculator:
             Stress tensor in Voigt notation [S11, S22, S33, S12, S23, S31]
         """
         m = self.mapdl
+
+        # Use actual mesh dimensions (updated from mesh bounds in _create_face_sets)
         Lx, Ly, Lz = self.Lx, self.Ly, self.Lz
 
-        # Face areas
+        # Face areas calculated from actual mesh dimensions
         A_yz = Ly * Lz  # XPOS/XNEG face area
         A_xz = Lx * Lz  # YPOS/YNEG face area
         A_xy = Lx * Ly  # ZPOS/ZNEG face area

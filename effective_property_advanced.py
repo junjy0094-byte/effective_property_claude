@@ -53,21 +53,29 @@ class AdvancedCompositeCalculator:
 
         Parameters
         ----------
-        rve_size : float
-            Size of the RVE cube in mm (L_x = L_y = L_z = L)
+        rve_size : float or tuple/list of 3 floats
+            Size of the RVE in mm.
+            - If float: L_x = L_y = L_z = rve_size (cube)
+            - If tuple/list: (L_x, L_y, L_z) for rectangular RVE
         fiber_vf : float
             Fiber volume fraction (0 to 1)
         """
-        self.L = rve_size
-        self.Lx = rve_size
-        self.Ly = rve_size
-        self.Lz = rve_size
-        self.Vf = fiber_vf
-        self.V = rve_size ** 3
+        # Handle rve_size as scalar or tuple/list
+        if isinstance(rve_size, (tuple, list)):
+            self.Lx, self.Ly, self.Lz = rve_size[0], rve_size[1], rve_size[2]
+            self.L = self.Lx  # For backward compatibility
+        else:
+            self.L = rve_size
+            self.Lx = rve_size
+            self.Ly = rve_size
+            self.Lz = rve_size
 
-        # Square fiber half-width from volume fraction
-        # Vf = (2*a)^2 / L^2 => a = L * sqrt(Vf) / 2
-        self.fiber_half_width = rve_size * np.sqrt(fiber_vf) / 2
+        self.Vf = fiber_vf
+        self.V = self.Lx * self.Ly * self.Lz
+
+        # Square fiber half-width from volume fraction (based on Lx, Ly cross-section)
+        # Vf = (2*a)^2 / (Lx * Ly) => a = sqrt(Vf * Lx * Ly) / 2
+        self.fiber_half_width = np.sqrt(fiber_vf * self.Lx * self.Ly) / 2
 
         # Material properties
         self.mat_props = {
@@ -83,6 +91,11 @@ class AdvancedCompositeCalculator:
         self.stiffness_matrix = None
         self.compliance_matrix = None
         self.effective_props = {}
+
+        # Mesh coordinate bounds (updated from actual mesh in _create_face_sets)
+        self.x_min, self.x_max = 0.0, self.Lx
+        self.y_min, self.y_max = 0.0, self.Ly
+        self.z_min, self.z_max = 0.0, self.Lz
 
     def set_material(self, phase, E, nu, alpha):
         """Set material properties for a phase."""
@@ -110,6 +123,171 @@ class AdvancedCompositeCalculator:
         if self.mapdl:
             self.mapdl.exit()
             self.mapdl = None
+
+    def save_database(self, db_path):
+        """
+        Save MAPDL database to a file for later resume.
+
+        Parameters
+        ----------
+        db_path : str
+            Path to save the database file (without extension).
+            The .db file will be saved in MAPDL working directory.
+
+        Returns
+        -------
+        str
+            Full path to the saved database file.
+        """
+        if not self.mapdl:
+            raise RuntimeError("MAPDL not launched. Call launch() first.")
+
+        m = self.mapdl
+
+        # Extract just the filename from db_path
+        db_name = os.path.basename(db_path)
+        if db_name.endswith('.db'):
+            db_name = db_name[:-3]
+
+        # Select all entities before saving
+        m.allsel()
+
+        # Finish any active processor before saving
+        m.finish()
+
+        # Save the database (includes geometry, mesh, materials, etc.)
+        m.save(db_name, 'ALL')
+
+        saved_path = os.path.join(m.directory, f"{db_name}.db")
+        print(f"Database saved: {saved_path}")
+
+        return saved_path
+
+    def resume_database(self, db_path):
+        """
+        Resume MAPDL database from a saved file.
+
+        This loads the mesh, materials, and model from the saved database and
+        recreates the face node sets and node pairs for periodic BC.
+        Note: Materials are already included in the database.
+
+        Parameters
+        ----------
+        db_path : str
+            Path to the database file. Can be:
+            - Full path: /path/to/model.db
+            - Filename only: model.db (looks in MAPDL working directory)
+
+        Returns
+        -------
+        bool
+            True if resume was successful.
+        """
+        if not self.mapdl:
+            raise RuntimeError("MAPDL not launched. Call launch() first.")
+
+        m = self.mapdl
+
+        # Handle db_path
+        if os.path.isabs(db_path):
+            # Full path provided - extract filename and copy to working dir if needed
+            db_dir = os.path.dirname(db_path)
+            db_name = os.path.basename(db_path)
+            if db_name.endswith('.db'):
+                db_name = db_name[:-3]
+
+            # If file is not in MAPDL working directory, we need to copy it
+            if db_dir != m.directory:
+                import shutil
+                src_file = db_path if db_path.endswith('.db') else db_path + '.db'
+                dst_file = os.path.join(m.directory, f"{db_name}.db")
+                if os.path.exists(src_file):
+                    shutil.copy2(src_file, dst_file)
+                    print(f"Copied database to MAPDL working directory: {dst_file}")
+        else:
+            # Relative path or filename
+            db_name = db_path
+            if db_name.endswith('.db'):
+                db_name = db_name[:-3]
+
+        print(f"\n{'='*60}")
+        print("RESUMING RVE MODEL FROM DATABASE")
+        print(f"{'='*60}")
+        print(f"Database: {db_name}.db")
+
+        # Clear current database before resume
+        m.finish()
+        m.clear()
+
+        # Resume the database
+        m.resume(db_name, 'DB')
+
+        # Enter preprocessor
+        m.prep7()
+
+        # Select all entities
+        m.allsel()
+
+        # Get mesh info
+        nn = int(m.get('NCOUNT', 'NODE', '', 'COUNT'))
+        ne = int(m.get('ECOUNT', 'ELEM', '', 'COUNT'))
+        print(f"Mesh loaded: {nn} nodes, {ne} elements")
+
+        if nn == 0 or ne == 0:
+            raise RuntimeError(f"Failed to load mesh from database. Nodes: {nn}, Elements: {ne}")
+
+        # Detect element type from element type definition
+        # Use ETLIST to get element type info
+        etlist_output = m.etlist()
+        if 'SOLID187' in etlist_output.upper():
+            self.element_type = 'SOLID187'
+        else:
+            self.element_type = 'SOLID185'
+        print(f"Element type: {self.element_type}")
+
+        # Recreate face node sets and node pairs for periodic BC
+        self._create_face_sets()
+
+        print("Database resumed successfully (materials already loaded from DB)")
+        return True
+
+    def run_analysis_from_db(self, db_path, strain_mag=0.001,
+                              save_results=True, result_prefix=''):
+        """
+        Run effective property analysis from a resumed database.
+
+        This is useful when you have already created and saved the RVE model
+        and want to compute effective properties without rebuilding the mesh.
+
+        Parameters
+        ----------
+        db_path : str
+            Path to the database file.
+        strain_mag : float
+            Strain magnitude for mechanical load cases (default: 0.001)
+        save_results : bool
+            Whether to save .rst result files (default: True)
+        result_prefix : str
+            Prefix for result file names (default: '')
+
+        Returns
+        -------
+        props : dict
+            All effective properties
+        """
+        # Resume the database
+        self.resume_database(db_path)
+
+        # Compute stiffness matrix
+        self.compute_stiffness_matrix(strain_mag, save_results, result_prefix)
+
+        # Extract engineering constants
+        self.compute_engineering_constants()
+
+        # Compute thermal properties
+        self.compute_thermal_expansion(save_results=save_results, result_prefix=result_prefix)
+
+        return self.effective_props
 
     def build_model(self, ele_size=0.05, n_div=None, element_type='SOLID185'):
         """
@@ -220,19 +398,34 @@ class AdvancedCompositeCalculator:
     def _create_face_sets(self):
         """Create node sets for each face and create node pairs for periodic BC."""
         m = self.mapdl
-        L = self.L
         tol = 1e-6
 
         print("  Creating face node sets for Periodic BC...")
 
+        # Get actual node coordinate bounds from mesh
+        m.allsel()
+        all_nodes = m.mesh.nodes  # shape (n_nodes, 3): [x, y, z]
+
+        # Store min/max coordinates as instance variables
+        self.x_min, self.x_max = all_nodes[:, 0].min(), all_nodes[:, 0].max()
+        self.y_min, self.y_max = all_nodes[:, 1].min(), all_nodes[:, 1].max()
+        self.z_min, self.z_max = all_nodes[:, 2].min(), all_nodes[:, 2].max()
+
+        # Update RVE dimensions from actual mesh bounds
+        self.Lx = self.x_max - self.x_min
+        self.Ly = self.y_max - self.y_min
+        self.Lz = self.z_max - self.z_min
+
+        print(f"    Mesh bounds: X=[{self.x_min:.4f}, {self.x_max:.4f}], Y=[{self.y_min:.4f}, {self.y_max:.4f}], Z=[{self.z_min:.4f}, {self.z_max:.4f}]")
+
         # Create face component sets and store node lists
         faces = [
-            ('XNEG', 'X', 0),
-            ('XPOS', 'X', L),
-            ('YNEG', 'Y', 0),
-            ('YPOS', 'Y', L),
-            ('ZNEG', 'Z', 0),
-            ('ZPOS', 'Z', L),
+            ('XNEG', 'X', self.x_min),
+            ('XPOS', 'X', self.x_max),
+            ('YNEG', 'Y', self.y_min),
+            ('YPOS', 'Y', self.y_max),
+            ('ZNEG', 'Z', self.z_min),
+            ('ZPOS', 'Z', self.z_max),
         ]
 
         self.face_nodes = {}
@@ -325,25 +518,25 @@ class AdvancedCompositeCalculator:
         """
         Find nodes for rigid body constraints (Equation 3.27).
 
-        u_x(point with x=0) = 0  -> fix UX at one node on x=0 plane
-        u_y(point with y=0) = 0  -> fix UY at one node on y=0 plane
-        u_z(point with z=0) = 0  -> fix UZ at one node on z=0 plane
+        u_x(point with x=x_min) = 0  -> fix UX at one node on x=x_min plane
+        u_y(point with y=y_min) = 0  -> fix UY at one node on y=y_min plane
+        u_z(point with z=z_min) = 0  -> fix UZ at one node on z=z_min plane
         """
         m = self.mapdl
         tol = 1e-6
 
-        # Node on x=0 plane for UX=0 constraint
-        m.nsel('S', 'LOC', 'X', 0, tol)
+        # Node on x=x_min plane for UX=0 constraint
+        m.nsel('S', 'LOC', 'X', self.x_min - tol, self.x_min + tol)
         nodes_x0 = m.mesh.nnum
         self.rigid_body_nodes['UX'] = int(nodes_x0[0]) if len(nodes_x0) > 0 else None
 
-        # Node on y=0 plane for UY=0 constraint
-        m.nsel('S', 'LOC', 'Y', 0, tol)
+        # Node on y=y_min plane for UY=0 constraint
+        m.nsel('S', 'LOC', 'Y', self.y_min - tol, self.y_min + tol)
         nodes_y0 = m.mesh.nnum
         self.rigid_body_nodes['UY'] = int(nodes_y0[0]) if len(nodes_y0) > 0 else None
 
-        # Node on z=0 plane for UZ=0 constraint
-        m.nsel('S', 'LOC', 'Z', 0, tol)
+        # Node on z=z_min plane for UZ=0 constraint
+        m.nsel('S', 'LOC', 'Z', self.z_min - tol, self.z_min + tol)
         nodes_z0 = m.mesh.nnum
         self.rigid_body_nodes['UZ'] = int(nodes_z0[0]) if len(nodes_z0) > 0 else None
 
@@ -389,11 +582,11 @@ class AdvancedCompositeCalculator:
         Based on ANSYS 2025 R1 Theory Documentation (Equations 3.24-3.27).
 
         The linear displacement field that satisfies periodic BC (Eq 3.24-3.26):
-            u_x(x,y,z) = ε_x * x
-            u_y(x,y,z) = γ_xy * x + ε_y * y
-            u_z(x,y,z) = γ_xz * x + γ_yz * y + ε_z * z
+            u_x(x,y,z) = ε_x * (x - x_min)
+            u_y(x,y,z) = γ_xy * (x - x_min) + ε_y * (y - y_min)
+            u_z(x,y,z) = γ_xz * (x - x_min) + γ_yz * (y - y_min) + ε_z * (z - z_min)
 
-        Rigid body constraints (Eq 3.27) are satisfied at nodes with x=0, y=0, z=0.
+        Rigid body constraints (Eq 3.27) are satisfied at nodes with x=x_min, y=y_min, z=z_min.
         """
         m = self.mapdl
 
@@ -412,15 +605,20 @@ class AdvancedCompositeCalculator:
         nnum_to_idx = {n: i for i, n in enumerate(all_nnum)}
 
         # Build all D commands as strings and send in batch for performance
-        # Note: eps_x, eps_y, eps_z signs are inverted for correct stress response
+        # Use relative coordinates (x - x_min, y - y_min, z - z_min)
         d_commands = []
         for node_num in boundary_nodes:
             idx = nnum_to_idx[node_num]
             x, y, z = all_nodes[idx]
 
-            ux = eps_x * x
-            uy = gamma_xy * x + eps_y * y
-            uz = gamma_xz * x + gamma_yz * y + eps_z * z
+            # Relative coordinates from mesh origin
+            rx = x - self.x_min
+            ry = y - self.y_min
+            rz = z - self.z_min
+
+            ux = eps_x * rx
+            uy = gamma_xy * rx + eps_y * ry
+            uz = gamma_xz * rx + gamma_yz * ry + eps_z * rz
 
             d_commands.append(f"D,{int(node_num)},UX,{ux}")
             d_commands.append(f"D,{int(node_num)},UY,{uy}")
@@ -605,12 +803,15 @@ class AdvancedCompositeCalculator:
         """Solve current load case and optionally save result file."""
         m = self.mapdl
 
+        # Always finish current processor before solving
+        m.finish()
+
         # Set jobname for this load case if provided
         if jobname:
-            m.finish()
             m.filname(jobname)
 
-        m.run('/SOLU')
+        # Enter solution processor
+        m.slashsolu()
         m.antype('STATIC')
         m.solve()
         m.finish()
@@ -644,6 +845,7 @@ class AdvancedCompositeCalculator:
 
         The macroscopic stress is computed from the total reaction forces
         on the boundary faces divided by the corresponding face areas.
+        Face areas are calculated from actual mesh bounds (Lx, Ly, Lz).
 
         For normal stresses:
             σ_x = F_x(XPOS) / A_yz  where A_yz = Ly × Lz
@@ -661,9 +863,11 @@ class AdvancedCompositeCalculator:
             Stress tensor in Voigt notation [S11, S22, S33, S12, S23, S31]
         """
         m = self.mapdl
+
+        # Use actual mesh dimensions (updated from mesh bounds in _create_face_sets)
         Lx, Ly, Lz = self.Lx, self.Ly, self.Lz
 
-        # Face areas
+        # Face areas calculated from actual mesh dimensions
         A_yz = Ly * Lz  # XPOS/XNEG face area
         A_xz = Lx * Lz  # YPOS/YNEG face area
         A_xy = Lx * Ly  # ZPOS/ZNEG face area
@@ -935,7 +1139,7 @@ class AdvancedCompositeCalculator:
         return {'alpha_x': alpha_x, 'alpha_y': alpha_y, 'alpha_z': alpha_z}
 
     def run_full_analysis(self, ele_size=0.05, strain_mag=0.001, element_type='SOLID185', n_div=None,
-                          save_results=True, result_prefix=''):
+                          save_results=True, result_prefix='', save_db=None):
         """
         Run complete analysis to get all effective properties.
 
@@ -953,6 +1157,9 @@ class AdvancedCompositeCalculator:
             Whether to save .rst result files (default: True)
         result_prefix : str
             Prefix for result file names (default: '')
+        save_db : str, optional
+            If provided, save the model database to this filename after building.
+            The database can be resumed later using run_analysis_from_db().
 
         Returns
         -------
@@ -961,6 +1168,10 @@ class AdvancedCompositeCalculator:
         """
         # Build model
         self.build_model(ele_size, n_div, element_type)
+
+        # Save database if requested
+        if save_db:
+            self.save_database(save_db)
 
         # Compute stiffness matrix
         self.compute_stiffness_matrix(strain_mag, save_results, result_prefix)

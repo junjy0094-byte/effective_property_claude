@@ -330,6 +330,9 @@ class AdvancedCompositeCalculator:
         m.mp('NUXY', 2, fp['nu'])
         m.mp('ALPX', 2, fp['alpha'])
 
+        # Set reference temperature (saved to DB for thermal analysis)
+        m.tref(0)
+
         # Element type: SOLID185 (8-node hex) or SOLID187 (10-node tet)
         self.element_type = element_type
         m.et(1, element_type)
@@ -793,8 +796,7 @@ class AdvancedCompositeCalculator:
         self._apply_periodic_bc(eps_x=0, eps_y=0, eps_z=0,
                                 gamma_xy=0, gamma_yz=0, gamma_xz=0)
 
-        # Apply thermal load
-        m.tref(0)  # Reference temperature = 0
+        # Apply thermal load (tref is already set in DB)
         m.bfunif('TEMP', delta_T)  # Current temperature = delta_T
 
         print(f"    Applied Periodic BC for LC7: Thermal (ΔT = {delta_T}°C)")
